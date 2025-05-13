@@ -44,6 +44,7 @@ type YdbStore struct {
 	SupportBucketTable bool
 	dbs                map[string]bool
 	dbsLock            sync.Mutex
+	prep               map[string]table.Statement
 }
 
 func init() {
@@ -101,6 +102,27 @@ func (store *YdbStore) initialize(dirBuckets string, dsn string, tablePathPrefix
 	if err := store.ensureTables(ctx); err != nil {
 		return err
 	}
+
+	store.prep = make(map[string]table.Statement)
+	err = store.DB.Table().Do(ctx, func(ctx context.Context, s table.Session) error {
+		qs := []string{
+			fmt.Sprintf(upsertQuery, store.tablePathPrefix),
+			fmt.Sprintf(deleteQuery, store.tablePathPrefix),
+			fmt.Sprintf(deleteFolderChildrenQuery, store.tablePathPrefix),
+			fmt.Sprintf(findQuery, store.tablePathPrefix),
+			fmt.Sprintf(listDirectoryQuery, store.tablePathPrefix),
+			fmt.Sprintf(listInclusiveDirectoryQuery, store.tablePathPrefix),
+		}
+		for _, q := range qs {
+			stmt, err := s.Prepare(ctx, q)
+			if err != nil {
+				return fmt.Errorf("prepare query %q: %v", q, err)
+			}
+			store.prep[q] = stmt
+		}
+		return nil
+	})
+
 	return err
 }
 
@@ -113,7 +135,17 @@ func (store *YdbStore) doTxOrDB(ctx context.Context, query *string, params *tabl
 		}
 	} else {
 		err = store.DB.Table().Do(ctx, func(ctx context.Context, s table.Session) (err error) {
-			_, res, err = s.Execute(ctx, tc, *query, params)
+			qText := *query
+			if stmt, ok := store.prep[qText]; ok {
+				_, res, err = stmt.Execute(ctx, tc, params)
+			} else {
+				stmt, perr := s.Prepare(ctx, qText)
+				if perr != nil {
+					return fmt.Errorf("prepare on-the-fly %q: %v", qText, perr)
+				}
+				store.prep[qText] = stmt
+				_, res, err = stmt.Execute(ctx, tc, params)
+			}
 			if err != nil {
 				return fmt.Errorf("execute statement: %v", err)
 			}
@@ -427,8 +459,18 @@ func (store *YdbStore) getPrefix(ctx context.Context, dir *string) (tablePathPre
 		defer store.dbsLock.Unlock()
 
 		if _, found := store.dbs[bucket]; !found {
-			glog.V(4).Infof("bucket %q not found, skipping table creation on getPrefix", bucket)
-			return
+			glog.V(4).Infof("bucket %q not in cache, verifying existence via DescribeTable", bucket)
+			tablePath := path.Join(store.tablePathPrefix, bucket, abstract_sql.DEFAULT_TABLE)
+			err2 := store.DB.Table().Do(ctx, func(ctx context.Context, s table.Session) error {
+				_, err3 := s.DescribeTable(ctx, tablePath)
+				return err3
+			})
+			if err2 != nil {
+				glog.Errorf("bucket %q not found (DescribeTable %s failed): %v", bucket, tablePath, err2)
+				return
+			}
+			glog.V(4).Infof("bucket %q exists, adding to cache", bucket)
+			store.dbs[bucket] = true
 		}
 		bucketPrefix := path.Join(store.tablePathPrefix, bucket)
 		tablePathPrefix = &bucketPrefix
