@@ -426,16 +426,12 @@ func (store *YdbStore) getPrefix(ctx context.Context, dir *string) (tablePathPre
 		store.dbsLock.Lock()
 		defer store.dbsLock.Unlock()
 
-		tablePathPrefixWithBucket := path.Join(store.tablePathPrefix, bucket)
 		if _, found := store.dbs[bucket]; !found {
-			if err := store.createTable(ctx, tablePathPrefixWithBucket); err == nil {
-				store.dbs[bucket] = true
-				glog.V(4).Infof("created table %s", tablePathPrefixWithBucket)
-			} else {
-				glog.Errorf("createTable %s: %v", tablePathPrefixWithBucket, err)
-			}
+			glog.V(4).Infof("bucket %q not found, skipping table creation on getPrefix", bucket)
+			return
 		}
-		tablePathPrefix = &tablePathPrefixWithBucket
+		bucketPrefix := path.Join(store.tablePathPrefix, bucket)
+		tablePathPrefix = &bucketPrefix
 	}
 	return
 }
