@@ -5,6 +5,7 @@ package ydb
 
 import (
 	"fmt"
+
 	"github.com/ydb-platform/ydb-go-sdk/v3/table"
 	"github.com/ydb-platform/ydb-go-sdk/v3/table/options"
 	"github.com/ydb-platform/ydb-go-sdk/v3/table/types"
@@ -42,7 +43,7 @@ func createTableOptions() []options.CreateTableOption {
 		options.WithColumn("name", types.Optional(types.TypeUTF8)),
 		options.WithColumn("meta", types.Optional(types.TypeString)),
 		options.WithColumn("expire_at", types.Optional(types.TypeUint32)),
-		options.WithPrimaryKeyColumn("dir_hash", "name"),
+		options.WithPrimaryKeyColumn("dir_hash", "directory", "name"),
 		options.WithTimeToLiveSettings(options.TimeToLiveSettings{
 			ColumnName: "expire_at",
 			ColumnUnit: &columnUnit,
@@ -50,6 +51,7 @@ func createTableOptions() []options.CreateTableOption {
 		),
 	}
 }
+
 func withPragma(prefix *string, query string) *string {
 	queryWithPragma := fmt.Sprintf(query, *prefix)
 	return &queryWithPragma
