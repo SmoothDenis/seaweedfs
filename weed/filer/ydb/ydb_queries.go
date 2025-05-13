@@ -50,12 +50,20 @@ const (
 		DECLARE $directory AS Utf8;
 		DECLARE $start_name AS Utf8;
 		DECLARE $prefix AS Utf8;
+		DECLARE $prefix_end AS Utf8;
 		DECLARE $limit AS Uint64;
-		
+
 		SELECT name, meta
 		FROM ` + asql.DEFAULT_TABLE + `
-		WHERE dir_hash = $dir_hash AND directory = $directory and name > $start_name and name LIKE $prefix
-		ORDER BY name ASC LIMIT $limit;`
+		WHERE dir_hash = $dir_hash
+			AND directory = $directory
+			AND name > $start_name
+			AND (
+				$prefix = ""
+				OR (name >= $prefix AND name < $prefix_end)
+			)
+		ORDER BY name ASC
+		LIMIT $limit;`
 
 	listInclusiveDirectoryQuery = `
 		PRAGMA TablePathPrefix("%v");
@@ -63,10 +71,18 @@ const (
 		DECLARE $directory AS Utf8;
 		DECLARE $start_name AS Utf8;
 		DECLARE $prefix AS Utf8;
+		DECLARE $prefix_end AS Utf8;
 		DECLARE $limit AS Uint64;
-		
+
 		SELECT name, meta
 		FROM ` + asql.DEFAULT_TABLE + `
-		WHERE dir_hash = $dir_hash AND directory = $directory and name >= $start_name and name LIKE $prefix
-		ORDER BY name ASC LIMIT $limit;`
+		WHERE dir_hash = $dir_hash
+			AND directory = $directory
+			AND name >= $start_name
+			AND (
+				$prefix = ""
+				OR (name >= $prefix AND name < $prefix_end)
+			)
+		ORDER BY name ASC
+		LIMIT $limit;`
 )

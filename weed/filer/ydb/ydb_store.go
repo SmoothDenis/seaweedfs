@@ -253,11 +253,13 @@ func (store *YdbStore) ListDirectoryPrefixedEntries(ctx context.Context, dirPath
 		}
 		glog.V(4).Infof("startFileName %s, restLimit %d, chunkLimit %d", startFileName, restLimit, chunkLimit)
 
+		endPrefix := nextPrefix(prefix)
 		queryParams := table.NewQueryParameters(
 			table.ValueParam("$dir_hash", types.Int64Value(util.HashStringToLong(*shortDir))),
 			table.ValueParam("$directory", types.UTF8Value(*shortDir)),
 			table.ValueParam("$start_name", types.UTF8Value(startFileName)),
-			table.ValueParam("$prefix", types.UTF8Value(prefix+"%")),
+			table.ValueParam("$prefix", types.UTF8Value(prefix)),
+			table.ValueParam("$prefix_end", types.UTF8Value(endPrefix)),
 			table.ValueParam("$limit", types.Uint64Value(uint64(chunkLimit))),
 		)
 		err = store.doTxOrDB(ctx, query, queryParams, roTX, func(res result.Result) error {
@@ -464,4 +466,8 @@ func (store *YdbStore) ensureTables(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+func nextPrefix(s string) string {
+	return s + "\U0010FFFF"
 }
