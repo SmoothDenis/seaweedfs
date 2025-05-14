@@ -101,22 +101,15 @@ func (store *YdbStore) initialize(dirBuckets string, dsn string, tablePathPrefix
 
 func (store *YdbStore) doTxOrDB(ctx context.Context, query *string, params *table.QueryParameters, tc *table.TransactionControl, processResultFunc func(res result.Result) error) (err error) {
 	var res result.Result
-	if tx, ok := ctx.Value("tx").(table.Transaction); ok {
-		res, err = tx.Execute(ctx, *query, params)
-		if err != nil {
-			return fmt.Errorf("execute transaction: %v", err)
-		}
-	} else {
-		err = store.DB.Table().Do(ctx, func(ctx context.Context, s table.Session) (err error) {
-			_, res, err = s.Execute(ctx, tc, *query, params)
-			if err != nil {
-				return fmt.Errorf("execute statement: %v", err)
-			}
-			return nil
+	err = store.DB.Table().DoTx(
+		ctx,
+		func(ctx context.Context, tx table.TransactionActor) error {
+			var e error
+			res, e = tx.Execute(ctx, *query, params)
+			return e
 		},
-			table.WithIdempotent(),
-		)
-	}
+		table.WithIdempotent(),
+	)
 	if err != nil {
 		return err
 	}
