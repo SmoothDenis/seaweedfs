@@ -6,6 +6,7 @@ package ydb
 import (
 	"context"
 	"fmt"
+
 	"github.com/seaweedfs/seaweedfs/weed/filer"
 	"github.com/seaweedfs/seaweedfs/weed/filer/abstract_sql"
 	"github.com/seaweedfs/seaweedfs/weed/util"
@@ -34,6 +35,7 @@ func (store *YdbStore) KvGet(ctx context.Context, key []byte) (value []byte, err
 		_, res, err := s.Execute(ctx, roTX, *withPragma(&store.tablePathPrefix, findQuery),
 			table.NewQueryParameters(
 				table.ValueParam("$dir_hash", types.Int64Value(dirHash)),
+				table.ValueParam("$directory", types.UTF8Value(dirStr)),
 				table.ValueParam("$name", types.UTF8Value(name))))
 		if err != nil {
 			return fmt.Errorf("kv get execute %s: %v", util.NewFullPath(dirStr, name).Name(), err)
@@ -65,6 +67,7 @@ func (store *YdbStore) KvDelete(ctx context.Context, key []byte) (err error) {
 		_, _, err = s.Execute(ctx, rwTX, *withPragma(&store.tablePathPrefix, deleteQuery),
 			table.NewQueryParameters(
 				table.ValueParam("$dir_hash", types.Int64Value(dirHash)),
+				table.ValueParam("$directory", types.UTF8Value(dirStr)),
 				table.ValueParam("$name", types.UTF8Value(name))))
 		if err != nil {
 			return fmt.Errorf("kv delete %s: %v", util.NewFullPath(dirStr, name).Name(), err)
