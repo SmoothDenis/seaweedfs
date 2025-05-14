@@ -199,6 +199,7 @@ func (store *YdbStore) FindEntry(ctx context.Context, fullpath util.FullPath) (e
 	query := withPragma(tablePathPrefix, findQuery)
 	queryParams := table.NewQueryParameters(
 		table.ValueParam("$dir_hash", types.Int64Value(util.HashStringToLong(*shortDir))),
+		table.ValueParam("$directory", types.UTF8Value(*shortDir)),
 		table.ValueParam("$name", types.UTF8Value(name)))
 
 	err = store.doTxOrDB(ctx, query, queryParams, roTX, func(res result.Result) error {
@@ -238,6 +239,7 @@ func (store *YdbStore) DeleteEntry(ctx context.Context, fullpath util.FullPath) 
 	glog.V(4).Infof("DeleteEntry %s, tablePathPrefix %s, shortDir %s", fullpath, *tablePathPrefix, *shortDir)
 	queryParams := table.NewQueryParameters(
 		table.ValueParam("$dir_hash", types.Int64Value(util.HashStringToLong(*shortDir))),
+		table.ValueParam("$directory", types.UTF8Value(*shortDir)),
 		table.ValueParam("$name", types.UTF8Value(name)))
 
 	return store.doTxOrDB(ctx, query, queryParams, rwTX, nil)
