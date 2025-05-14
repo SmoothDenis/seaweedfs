@@ -38,7 +38,7 @@ var (
 )
 
 type YdbStore struct {
-	DB                 ydb.Connection
+	DB                 *ydb.Driver
 	dirBuckets         string
 	tablePathPrefix    string
 	SupportBucketTable bool
@@ -72,8 +72,7 @@ func (store *YdbStore) initialize(dirBuckets string, dsn string, tablePathPrefix
 		glog.V(0).Infof("enabled BucketPrefix")
 	}
 	store.dbs = make(map[string]bool)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := context.Background()
 	if dialTimeOut == 0 {
 		dialTimeOut = defaultDialTimeOut
 	}
@@ -89,11 +88,7 @@ func (store *YdbStore) initialize(dirBuckets string, dsn string, tablePathPrefix
 	}
 	store.DB, err = ydb.Open(ctx, dsn, opts...)
 	if err != nil {
-		if store.DB != nil {
-			_ = store.DB.Close(ctx)
-			store.DB = nil
-		}
-		return fmt.Errorf("can not connect to %s error: %v", dsn, err)
+		return fmt.Errorf("can not connect to %s: %w", dsn, err)
 	}
 
 	store.tablePathPrefix = path.Join(store.DB.Name(), tablePathPrefix)
@@ -303,29 +298,14 @@ func (store *YdbStore) ListDirectoryPrefixedEntries(ctx context.Context, dirPath
 }
 
 func (store *YdbStore) BeginTransaction(ctx context.Context) (context.Context, error) {
-	session, err := store.DB.Table().CreateSession(ctx)
-	if err != nil {
-		return ctx, err
-	}
-	tx, err := session.BeginTransaction(ctx, table.TxSettings(table.WithSerializableReadWrite()))
-	if err != nil {
-		return ctx, err
-	}
-	return context.WithValue(ctx, "tx", tx), nil
+	return ctx, nil
 }
 
 func (store *YdbStore) CommitTransaction(ctx context.Context) error {
-	if tx, ok := ctx.Value("tx").(table.Transaction); ok {
-		_, err := tx.CommitTx(ctx)
-		return err
-	}
 	return nil
 }
 
 func (store *YdbStore) RollbackTransaction(ctx context.Context) error {
-	if tx, ok := ctx.Value("tx").(table.Transaction); ok {
-		return tx.Rollback(ctx)
-	}
 	return nil
 }
 
