@@ -31,7 +31,7 @@ func (fm *FileMeta) queryParameters(ttlSec int32) *table.QueryParameters {
 		table.ValueParam("$dir_hash", types.Int64Value(fm.DirHash)),
 		table.ValueParam("$directory", types.UTF8Value(fm.Directory)),
 		table.ValueParam("$name", types.UTF8Value(fm.Name)),
-		table.ValueParam("$meta", types.StringValue(fm.Meta)),
+		table.ValueParam("$meta", types.BytesValue(fm.Meta)),
 		table.ValueParam("$expire_at", expireAtValue))
 }
 
@@ -43,17 +43,20 @@ func createTableOptions() []options.CreateTableOption {
 		options.WithColumn("name", types.Optional(types.TypeUTF8)),
 		options.WithColumn("meta", types.Optional(types.TypeString)),
 		options.WithColumn("expire_at", types.Optional(types.TypeUint32)),
-		options.WithPrimaryKeyColumn("dir_hash", "directory", "name"),
+		options.WithPrimaryKeyColumn("dir_hash", "name"),
 		options.WithTimeToLiveSettings(options.TimeToLiveSettings{
 			ColumnName: "expire_at",
 			ColumnUnit: &columnUnit,
 			Mode:       options.TimeToLiveModeValueSinceUnixEpoch},
 		),
-		options.WithPartitioningSettings(options.PartitioningSettings{
-			HashSharding: &options.HashShardingSettings{
-				Column:     "dir_hash",
-				ShardCount: 16,
-			}}),
+		options.WithPartitioningSettings(
+			options.WithPartitioningBy([]string{"dir_hash"}),
+			options.WithPartitioningBySize(options.FeatureEnabled),
+			options.WithPartitionSizeMb(64),
+			options.WithPartitioningByLoad(options.FeatureEnabled),
+			options.WithMinPartitionsCount(8),
+			options.WithMaxPartitionsCount(512),
+		),
 	}
 }
 
