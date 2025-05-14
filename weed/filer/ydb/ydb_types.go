@@ -49,6 +49,11 @@ func createTableOptions() []options.CreateTableOption {
 			ColumnUnit: &columnUnit,
 			Mode:       options.TimeToLiveModeValueSinceUnixEpoch},
 		),
+		options.WithPartitioningSettings(options.PartitioningSettings{
+			HashSharding: &options.HashShardingSettings{
+				Column:     "dir_hash",
+				ShardCount: 16,
+			}}),
 	}
 }
 
