@@ -38,21 +38,21 @@ func (fm *FileMeta) queryParameters(ttlSec int32) *table.QueryParameters {
 func createTableOptions() []options.CreateTableOption {
 	columnUnit := options.TimeToLiveUnitSeconds
 	return []options.CreateTableOption{
-		options.WithColumn("dir_hash", types.Optional(types.TypeInt64)),
-		options.WithColumn("directory", types.Optional(types.TypeUTF8)),
-		options.WithColumn("name", types.Optional(types.TypeUTF8)),
-		options.WithColumn("meta", types.Optional(types.TypeString)),
+		options.WithColumn("dir_hash", types.TypeInt64),
+		options.WithColumn("directory", types.TypeUTF8),
+		options.WithColumn("name", types.TypeUTF8),
+		options.WithColumn("meta", types.TypeString),
 		options.WithColumn("expire_at", types.Optional(types.TypeUint32)),
-		options.WithPrimaryKeyColumn("dir_hash", "name"),
+		options.WithPrimaryKeyColumn("dir_hash", "directory", "name"),
 		options.WithTimeToLiveSettings(options.TimeToLiveSettings{
 			ColumnName: "expire_at",
 			ColumnUnit: &columnUnit,
 			Mode:       options.TimeToLiveModeValueSinceUnixEpoch},
 		),
 		options.WithPartitioningSettings(
-			options.WithPartitioningBy([]string{"dir_hash"}),
+			options.WithPartitioningBy([]string{"dir_hash", "name"}),
 			options.WithPartitioningBySize(options.FeatureEnabled),
-			options.WithPartitionSizeMb(2),
+			options.WithPartitionSizeMb(20),
 			options.WithPartitioningByLoad(options.FeatureDisabled),
 			options.WithMinPartitionsCount(1),
 			options.WithMaxPartitionsCount(1000),
