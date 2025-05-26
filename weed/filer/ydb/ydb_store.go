@@ -219,19 +219,24 @@ func (store *YdbStore) ListDirectoryEntries(ctx context.Context, dirPath util.Fu
 func (store *YdbStore) ListDirectoryPrefixedEntries(ctx context.Context, dirPath util.FullPath, startFileName string, includeStartFile bool, limit int64, prefix string, eachEntryFunc filer.ListEachEntryFunc) (lastFileName string, err error) {
 	dir := string(dirPath)
 	tablePathPrefix, shortDir := store.getPrefix(ctx, &dir)
-	rawQuery := *withPragma(tablePathPrefix, listDirectoryQuery)
+	var query *string
 	if includeStartFile {
-		rawQuery = *withPragma(tablePathPrefix, listInclusiveDirectoryQuery)
+		query = withPragma(tablePathPrefix, listInclusiveDirectoryQuery)
+	} else {
+		query = withPragma(tablePathPrefix, listDirectoryQuery)
 	}
 	truncated := true
+	eachEntryFuncIsNotBreake := true
 	entryCount := int64(0)
-	const maxChunk = int64(1000)
-	for truncated {
+	for truncated && eachEntryFuncIsNotBreake {
 		if lastFileName != "" {
 			startFileName = lastFileName
-			rawQuery = *withPragma(tablePathPrefix, listDirectoryQuery)
+			if includeStartFile {
+				query = withPragma(tablePathPrefix, listDirectoryQuery)
+			}
 		}
 		restLimit := limit - entryCount
+		const maxChunk = int64(1000)
 		chunkLimit := restLimit
 		if chunkLimit > maxChunk {
 			chunkLimit = maxChunk
@@ -239,7 +244,7 @@ func (store *YdbStore) ListDirectoryPrefixedEntries(ctx context.Context, dirPath
 		glog.V(4).Infof("startFileName %s, restLimit %d, chunkLimit %d", startFileName, restLimit, chunkLimit)
 
 		endPrefix := nextPrefix(prefix)
-		params := table.NewQueryParameters(
+		queryParams := table.NewQueryParameters(
 			table.ValueParam("$dir_hash", types.Int64Value(util.HashStringToLong(*shortDir))),
 			table.ValueParam("$directory", types.UTF8Value(*shortDir)),
 			table.ValueParam("$start_name", types.UTF8Value(startFileName)),
@@ -247,52 +252,41 @@ func (store *YdbStore) ListDirectoryPrefixedEntries(ctx context.Context, dirPath
 			table.ValueParam("$prefix_end", types.UTF8Value(endPrefix)),
 			table.ValueParam("$limit", types.Uint64Value(uint64(chunkLimit))),
 		)
-
-		err = store.DB.Table().Do(ctx, func(ctx context.Context, session table.Session) error {
-			res, err := session.StreamExecuteScanQuery(ctx, rawQuery, params)
-			if err != nil {
-				return err
+		err = store.doTxOrDB(ctx, query, queryParams, roTX, func(res result.Result) error {
+			var name string
+			var data []byte
+			if !res.NextResultSet(ctx) || !res.HasNextRow() {
+				truncated = false
+				return nil
 			}
-			defer func() { _ = res.Close() }()
-
-			for res.NextResultSet(ctx) {
-				if !res.HasNextRow() {
-					truncated = false
-					return nil
+			truncated = res.CurrentResultSet().Truncated()
+			glog.V(4).Infof("truncated %v, entryCount %d", truncated, entryCount)
+			for res.NextRow() {
+				if err := res.ScanNamed(
+					named.OptionalWithDefault("name", &name),
+					named.OptionalWithDefault("meta", &data)); err != nil {
+					return fmt.Errorf("list scanNamed %s : %v", dir, err)
 				}
-				truncated = res.CurrentResultSet().Truncated()
-
-				for res.NextRow() {
-					var name string
-					var data []byte
-					if err := res.ScanNamed(
-						named.OptionalWithDefault("name", &name),
-						named.OptionalWithDefault("meta", &data),
-					); err != nil {
-						return fmt.Errorf("list scanNamed %s: %v", dir, err)
-					}
-					lastFileName = name
-
-					entry := &filer.Entry{FullPath: util.NewFullPath(dir, name)}
-					if err := entry.DecodeAttributesAndChunks(util.MaybeDecompressData(data)); err != nil {
-						return fmt.Errorf("scan decode %s: %v", entry.FullPath, err)
-					}
-
-					if !eachEntryFunc(entry) {
-						truncated = false
-						return nil
-					}
-					entryCount++
+				glog.V(8).Infof("name %s, fullpath %s", name, util.NewFullPath(dir, name))
+				lastFileName = name
+				entry := &filer.Entry{
+					FullPath: util.NewFullPath(dir, name),
 				}
+				if err = entry.DecodeAttributesAndChunks(util.MaybeDecompressData(data)); err != nil {
+					return fmt.Errorf("scan decode %s : %v", entry.FullPath, err)
+				}
+				if !eachEntryFunc(entry) {
+					eachEntryFuncIsNotBreake = false
+					break
+				}
+				entryCount += 1
 			}
 			return res.Err()
 		})
-
-		if err != nil {
-			return lastFileName, err
-		}
 	}
-
+	if err != nil {
+		return lastFileName, err
+	}
 	return lastFileName, nil
 }
 
