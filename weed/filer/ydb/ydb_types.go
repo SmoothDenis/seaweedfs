@@ -53,10 +53,11 @@ func createTableOptions() []options.CreateTableOption {
 			options.WithPartitioningBy([]string{"dir_hash", "name"}),
 			options.WithPartitioningBySize(options.FeatureEnabled),
 			options.WithPartitionSizeMb(15),
-			options.WithPartitioningByLoad(options.FeatureDisabled),
-			options.WithMinPartitionsCount(4),
+			options.WithPartitioningByLoad(options.FeatureEnabled),
+			options.WithMinPartitionsCount(10),
 			options.WithMaxPartitionsCount(1000),
 		),
+		options.WithUniformPartitions(10),
 	}
 }
 
