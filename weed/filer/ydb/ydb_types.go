@@ -57,7 +57,6 @@ func createTableOptions() []options.CreateTableOption {
 			options.WithMinPartitionsCount(10),
 			options.WithMaxPartitionsCount(1000),
 		),
-		options.WithUniformPartitions(10),
 	}
 }
 
