@@ -35,7 +35,7 @@ func (fm *FileMeta) queryParameters(ttlSec int32) *table.QueryParameters {
 		table.ValueParam("$expire_at", expireAtValue))
 }
 
-func createTableOptions() []options.CreateTableOption {
+func (store *YdbStore) createTableOptions() []options.CreateTableOption {
 	columnUnit := options.TimeToLiveUnitSeconds
 	return []options.CreateTableOption{
 		options.WithColumn("dir_hash", types.TypeInt64),
@@ -51,11 +51,11 @@ func createTableOptions() []options.CreateTableOption {
 		),
 		options.WithPartitioningSettings(
 			options.WithPartitioningBy([]string{"dir_hash", "name"}),
-			options.WithPartitioningBySize(options.FeatureEnabled),
-			options.WithPartitionSizeMb(15),
-			options.WithPartitioningByLoad(options.FeatureEnabled),
-			options.WithMinPartitionsCount(10),
-			options.WithMaxPartitionsCount(1000),
+			options.WithPartitioningBySize(store.partitionBySizeEnabled),
+			options.WithPartitionSizeMb(store.partitionSizeMb),
+			options.WithPartitioningByLoad(store.partitionByLoadEnabled),
+			options.WithMinPartitionsCount(store.minPartitionsCount),
+			options.WithMaxPartitionsCount(store.maxPartitionsCount),
 		),
 	}
 }
