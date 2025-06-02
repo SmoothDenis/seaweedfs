@@ -43,7 +43,7 @@ func (store *YdbStore) createTableOptions() []options.CreateTableOption {
 		options.WithColumn("name", types.TypeUTF8),
 		options.WithColumn("meta", types.TypeString),
 		options.WithColumn("expire_at", types.Optional(types.TypeUint32)),
-		options.WithPrimaryKeyColumn("dir_hash", "name"),
+		options.WithPrimaryKeyColumn("dir_hash", "directory", "name"),
 		options.WithTimeToLiveSettings(options.TimeToLiveSettings{
 			ColumnName: "expire_at",
 			ColumnUnit: &columnUnit,

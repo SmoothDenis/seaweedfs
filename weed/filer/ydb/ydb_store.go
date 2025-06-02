@@ -41,9 +41,6 @@ var (
 	roTC = table.TxSettings(
 		table.WithOnlineReadOnly(),
 	)
-	rwTC = table.TxSettings(
-		table.WithSerializableReadWrite(),
-	)
 	roTX = table.OnlineReadOnlyTxControl()
 	rwTX = table.DefaultTxControl()
 )
@@ -138,15 +135,22 @@ func (store *YdbStore) initialize(dirBuckets string, dsn string, tablePathPrefix
 	return err
 }
 
-func (store *YdbStore) doTxOrDB(ctx context.Context, query *string, params *table.QueryParameters, ts *table.TransactionSettings, processResultFunc func(res result.Result) error) (err error) {
+func (store *YdbStore) doTxOrDB(ctx context.Context, query *string, params *table.QueryParameters, tc *table.TransactionControl, processResultFunc func(res result.Result) error) (err error) {
 	var res result.Result
-	err = store.DB.Table().DoTx(ctx, func(ctx context.Context, tx table.TransactionActor) (err error) {
+	if tx, ok := ctx.Value("tx").(table.Transaction); ok {
 		res, err = tx.Execute(ctx, *query, params)
 		if err != nil {
-			return err
+			return fmt.Errorf("execute transaction: %v", err)
 		}
-		return nil
-	}, table.WithTxSettings(ts), table.WithIdempotent())
+	} else {
+		err = store.DB.Table().Do(ctx, func(ctx context.Context, s table.Session) (err error) {
+			_, res, err = s.Execute(ctx, tc, *query, params)
+			if err != nil {
+				return fmt.Errorf("execute statement: %v", err)
+			}
+			return nil
+		}, table.WithIdempotent())
+	}
 	if err != nil {
 		return err
 	}
@@ -195,7 +199,7 @@ func (store *YdbStore) insertOrUpdateEntry(ctx context.Context, entry *filer.Ent
 	}
 	tablePathPrefix, shortDir := store.getPrefix(ctx, &dir)
 	fileMeta := FileMeta{util.HashStringToLong(dir), name, *shortDir, meta}
-	return store.doTxOrDB(ctx, withPragma(tablePathPrefix, upsertQuery), fileMeta.queryParameters(entry.TtlSec), rwTC, nil)
+	return store.doTxOrDB(ctx, withPragma(tablePathPrefix, upsertQuery), fileMeta.queryParameters(entry.TtlSec), rwTX, nil)
 }
 
 func (store *YdbStore) InsertEntry(ctx context.Context, entry *filer.Entry) (err error) {
@@ -257,7 +261,7 @@ func (store *YdbStore) DeleteEntry(ctx context.Context, fullpath util.FullPath) 
 		table.ValueParam("$directory", types.UTF8Value(*shortDir)),
 		table.ValueParam("$name", types.UTF8Value(name)))
 
-	return store.doTxOrDB(ctx, query, queryParams, rwTC, nil)
+	return store.doTxOrDB(ctx, query, queryParams, rwTX, nil)
 }
 
 func (store *YdbStore) DeleteFolderChildren(ctx context.Context, fullpath util.FullPath) (err error) {
@@ -268,7 +272,7 @@ func (store *YdbStore) DeleteFolderChildren(ctx context.Context, fullpath util.F
 		table.ValueParam("$dir_hash", types.Int64Value(util.HashStringToLong(*shortDir))),
 		table.ValueParam("$directory", types.UTF8Value(*shortDir)))
 
-	return store.doTxOrDB(ctx, query, queryParams, rwTC, nil)
+	return store.doTxOrDB(ctx, query, queryParams, rwTX, nil)
 }
 
 func (store *YdbStore) ListDirectoryEntries(ctx context.Context, dirPath util.FullPath, startFileName string, includeStartFile bool, limit int64, eachEntryFunc filer.ListEachEntryFunc) (lastFileName string, err error) {
@@ -314,8 +318,8 @@ func (store *YdbStore) ListDirectoryPrefixedEntries(ctx context.Context, dirPath
 					var name string
 					var data []byte
 					if err := res.ScanNamed(
-						named.OptionalWithDefault("name", &name),
-						named.OptionalWithDefault("meta", &data),
+						named.Required("name", &name),
+						named.Required("meta", &data),
 					); err != nil {
 						return fmt.Errorf("scanNamed %s: %w", dir, err)
 					}
