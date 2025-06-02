@@ -38,7 +38,7 @@ const (
 )
 
 var (
-	roQC = query.WithTxControl(query.TxControl(query.BeginTx(query.WithOnlineReadOnly())))
+	roQC = query.WithTxControl(query.OnlineReadOnlyTxControl())
 	roTX = table.OnlineReadOnlyTxControl()
 	rwTX = table.DefaultTxControl()
 )
