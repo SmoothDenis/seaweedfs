@@ -21,26 +21,24 @@ import (
 	"github.com/seaweedfs/seaweedfs/weed/util"
 	environ "github.com/ydb-platform/ydb-go-sdk-auth-environ"
 	"github.com/ydb-platform/ydb-go-sdk/v3"
+	"github.com/ydb-platform/ydb-go-sdk/v3/query"
 	"github.com/ydb-platform/ydb-go-sdk/v3/table"
 	"github.com/ydb-platform/ydb-go-sdk/v3/table/result"
-	"github.com/ydb-platform/ydb-go-sdk/v3/table/result/named"
 	"github.com/ydb-platform/ydb-go-sdk/v3/table/types"
 )
 
 const (
 	defaultDialTimeOut            = 10
 	defaultPartitionBySizeEnabled = true
-	defaultPartitionSizeMb        = 15
+	defaultPartitionSizeMb        = 200
 	defaultPartitionByLoadEnabled = true
-	defaultMinPartitionsCount     = 10
+	defaultMinPartitionsCount     = 5
 	defaultMaxPartitionsCount     = 1000
-	maxChunk                      = 10000
+	maxChunk                      = 5000
 )
 
 var (
-	roTC = table.TxSettings(
-		table.WithOnlineReadOnly(),
-	)
+	roQC = query.WithTxControl(query.TxControl(query.BeginTx(query.WithOnlineReadOnly())))
 	roTX = table.OnlineReadOnlyTxControl()
 	rwTX = table.DefaultTxControl()
 )
@@ -165,26 +163,28 @@ func (store *YdbStore) doTxOrDB(ctx context.Context, query *string, params *tabl
 	return err
 }
 
-func (store *YdbStore) doReadQuery(ctx context.Context, query *string, params *table.QueryParameters, ts *table.TransactionSettings, processResult func(res result.StreamResult) error) error {
-	return store.DB.Table().Do(ctx, func(ctx context.Context, s table.Session) error {
-		streamRes, err := s.StreamExecuteScanQuery(ctx, *query, params)
-		glog.V(3).Infof("doReadQuery: StreamExecuteScanQuery returned err=%v", err)
+func (store *YdbStore) doReadQuery(ctx context.Context, q *string, params *table.QueryParameters, qc query.ExecuteOption, processResult func(res query.Result) error) error {
+	return store.DB.Query().Do(ctx, func(ctx context.Context, s query.Session) error {
+		res, err := s.Query(ctx, *q,
+			query.WithParameters(params),
+			query.WithIdempotent(), qc)
+		glog.V(3).Infof("doReadQuery (Query API): StreamExecuteDataQuery returned err=%v", err)
 		if err != nil {
 			return err
 		}
 		defer func() {
-			glog.V(3).Info("doReadQuery: closing stream result")
-			_ = streamRes.Close()
+			glog.V(3).Info("doReadQuery (Query API): closing stream result")
+			_ = res.Close(ctx)
 		}()
-		glog.V(3).Info("doReadQuery: stream opened, invoking processResult")
+		glog.V(3).Info("doReadQuery (Query API): result obtained, invoking processResult")
 		if processResult != nil {
-			if err := processResult(streamRes); err != nil {
-				glog.Errorf("doReadQuery: processResult error: %v", err)
-				return fmt.Errorf("process result: %w", err)
+			if procErr := processResult(res); procErr != nil {
+				glog.Errorf("doReadQuery (Query API): processResult error: %v", procErr)
+				return fmt.Errorf("process result: %w", procErr)
 			}
 		}
 		return nil
-	}, table.WithTxSettings(ts), table.WithIdempotent())
+	})
 }
 
 func (store *YdbStore) insertOrUpdateEntry(ctx context.Context, entry *filer.Entry) (err error) {
@@ -215,24 +215,29 @@ func (store *YdbStore) FindEntry(ctx context.Context, fullpath util.FullPath) (e
 	var data []byte
 	entryFound := false
 	tablePathPrefix, shortDir := store.getPrefix(ctx, &dir)
-	query := withPragma(tablePathPrefix, findQuery)
+	q := withPragma(tablePathPrefix, findQuery)
 	queryParams := table.NewQueryParameters(
 		table.ValueParam("$dir_hash", types.Int64Value(util.HashStringToLong(*shortDir))),
 		table.ValueParam("$directory", types.UTF8Value(*shortDir)),
 		table.ValueParam("$name", types.UTF8Value(name)))
 
-	err = store.doReadQuery(ctx, query, queryParams, roTC, func(res result.StreamResult) error {
-		if !res.NextResultSet(ctx) || !res.HasNextRow() {
-			return nil
-		}
-		for res.NextRow() {
-			if err = res.ScanNamed(named.OptionalWithDefault("meta", &data)); err != nil {
-				return fmt.Errorf("scanNamed %s : %v", fullpath, err)
+	err = store.doReadQuery(ctx, q, queryParams, roQC, func(res query.Result) error {
+		for rs, err := range res.ResultSets(ctx) {
+			if err != nil {
+				return err
 			}
-			entryFound = true
-			return nil
+			for row, err := range rs.Rows(ctx) {
+				if err != nil {
+					return err
+				}
+				if scanErr := row.Scan(&data); scanErr != nil {
+					return fmt.Errorf("scan %s: %v", fullpath, scanErr)
+				}
+				entryFound = true
+				return nil
+			}
 		}
-		return res.Err()
+		return nil
 	})
 	if err != nil {
 		return nil, err
@@ -241,38 +246,35 @@ func (store *YdbStore) FindEntry(ctx context.Context, fullpath util.FullPath) (e
 		return nil, filer_pb.ErrNotFound
 	}
 
-	entry = &filer.Entry{
-		FullPath: fullpath,
+	entry = &filer.Entry{FullPath: fullpath}
+	if decodeErr := entry.DecodeAttributesAndChunks(util.MaybeDecompressData(data)); decodeErr != nil {
+		return nil, fmt.Errorf("decode %s: %v", fullpath, decodeErr)
 	}
-	if err := entry.DecodeAttributesAndChunks(util.MaybeDecompressData(data)); err != nil {
-		return nil, fmt.Errorf("decode %s : %v", fullpath, err)
-	}
-
 	return entry, nil
 }
 
 func (store *YdbStore) DeleteEntry(ctx context.Context, fullpath util.FullPath) (err error) {
 	dir, name := fullpath.DirAndName()
 	tablePathPrefix, shortDir := store.getPrefix(ctx, &dir)
-	query := withPragma(tablePathPrefix, deleteQuery)
+	q := withPragma(tablePathPrefix, deleteQuery)
 	glog.V(4).Infof("DeleteEntry %s, tablePathPrefix %s, shortDir %s", fullpath, *tablePathPrefix, *shortDir)
 	queryParams := table.NewQueryParameters(
 		table.ValueParam("$dir_hash", types.Int64Value(util.HashStringToLong(*shortDir))),
 		table.ValueParam("$directory", types.UTF8Value(*shortDir)),
 		table.ValueParam("$name", types.UTF8Value(name)))
 
-	return store.doTxOrDB(ctx, query, queryParams, rwTX, nil)
+	return store.doTxOrDB(ctx, q, queryParams, rwTX, nil)
 }
 
 func (store *YdbStore) DeleteFolderChildren(ctx context.Context, fullpath util.FullPath) (err error) {
 	dir := string(fullpath)
 	tablePathPrefix, shortDir := store.getPrefix(ctx, &dir)
-	query := withPragma(tablePathPrefix, deleteFolderChildrenQuery)
+	q := withPragma(tablePathPrefix, deleteFolderChildrenQuery)
 	queryParams := table.NewQueryParameters(
 		table.ValueParam("$dir_hash", types.Int64Value(util.HashStringToLong(*shortDir))),
 		table.ValueParam("$directory", types.UTF8Value(*shortDir)))
 
-	return store.doTxOrDB(ctx, query, queryParams, rwTX, nil)
+	return store.doTxOrDB(ctx, q, queryParams, rwTX, nil)
 }
 
 func (store *YdbStore) ListDirectoryEntries(ctx context.Context, dirPath util.FullPath, startFileName string, includeStartFile bool, limit int64, eachEntryFunc filer.ListEachEntryFunc) (lastFileName string, err error) {
@@ -286,11 +288,11 @@ func (store *YdbStore) ListDirectoryPrefixedEntries(ctx context.Context, dirPath
 	baseExclusive := withPragma(tablePathPrefix, listDirectoryQuery)
 	var entryCount int64
 	for entryCount < limit {
-		var query *string
+		var q *string
 		if entryCount == 0 && includeStartFile {
-			query = baseInclusive
+			q = baseInclusive
 		} else {
-			query = baseExclusive
+			q = baseExclusive
 		}
 		rest := limit - entryCount
 		chunkLimit := rest
@@ -307,27 +309,27 @@ func (store *YdbStore) ListDirectoryPrefixedEntries(ctx context.Context, dirPath
 			table.ValueParam("$limit", types.Uint64Value(uint64(chunkLimit))),
 		)
 
-		err = store.doReadQuery(ctx, query, params, roTC, func(res result.StreamResult) error {
-			for res.NextResultSet(ctx) {
-				if !res.HasNextRow() {
-					break
+		err := store.doReadQuery(ctx, q, params, roQC, func(res query.Result) error {
+			for rs, err := range res.ResultSets(ctx) {
+				if err != nil {
+					return err
 				}
-				for res.NextRow() {
+				for row, err := range rs.Rows(ctx) {
+					if err != nil {
+						return err
+					}
 					receivedThisChunk = true
 
 					var name string
 					var data []byte
-					if err := res.ScanNamed(
-						named.Required("name", &name),
-						named.Required("meta", &data),
-					); err != nil {
-						return fmt.Errorf("scanNamed %s: %w", dir, err)
+					if scanErr := row.Scan(&name, &data); scanErr != nil {
+						return fmt.Errorf("scan %s: %w", dir, scanErr)
 					}
 
 					lastFileName = name
 					entry := &filer.Entry{FullPath: util.NewFullPath(dir, name)}
-					if err := entry.DecodeAttributesAndChunks(util.MaybeDecompressData(data)); err != nil {
-						return fmt.Errorf("decode entry %s: %w", entry.FullPath, err)
+					if decodeErr := entry.DecodeAttributesAndChunks(util.MaybeDecompressData(data)); decodeErr != nil {
+						return fmt.Errorf("decode entry %s: %w", entry.FullPath, decodeErr)
 					}
 
 					if !eachEntryFunc(entry) {
@@ -341,12 +343,6 @@ func (store *YdbStore) ListDirectoryPrefixedEntries(ctx context.Context, dirPath
 						return nil
 					}
 				}
-				if err := res.Err(); err != nil {
-					return err
-				}
-				if !res.CurrentResultSet().Truncated() {
-					break
-				}
 			}
 			return nil
 		})
@@ -357,7 +353,6 @@ func (store *YdbStore) ListDirectoryPrefixedEntries(ctx context.Context, dirPath
 			break
 		}
 	}
-
 	return lastFileName, nil
 }
 
