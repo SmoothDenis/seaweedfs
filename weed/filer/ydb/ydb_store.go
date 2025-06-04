@@ -38,7 +38,7 @@ const (
 )
 
 var (
-	roQC = query.TxSettings(query.WithOnlineReadOnly())
+	roQC = query.WithTxControl(query.OnlineReadOnlyTxControl())
 	roTX = table.OnlineReadOnlyTxControl()
 	rwTX = table.DefaultTxControl()
 )
@@ -163,27 +163,34 @@ func (store *YdbStore) doTxOrDB(ctx context.Context, query *string, params *tabl
 	return err
 }
 
-func (store *YdbStore) doReadQuery(ctx context.Context, q *string, params *table.QueryParameters, qs query.TransactionSettings, processResult func(res query.Result) error) error {
-	return store.DB.Query().DoTx(ctx, func(ctx context.Context, tx query.TxActor) error {
-		res, err := tx.Query(ctx, *q,
-			query.WithParameters(params),
-			query.WithIdempotent())
+func (store *YdbStore) doReadQuery(ctx context.Context, q *string, params *table.QueryParameters, ts query.ExecuteOption, processResultFunc func(res query.Result) error) (err error) {
+	var res query.Result
+	if tx, ok := ctx.Value("tx").(query.Transaction); ok {
+		res, err = tx.Query(ctx, *q, query.WithParameters(params))
 		if err != nil {
-			return err
+			return fmt.Errorf("execute transaction: %v", err)
 		}
-		defer func() {
-			if err = res.Close(ctx); err != nil {
-				glog.Errorf("close result: %v", err)
+	} else {
+		err = store.DB.Query().Do(ctx, func(ctx context.Context, s query.Session) (err error) {
+			res, err = s.Query(ctx, *q, query.WithParameters(params), query.WithIdempotent(), ts)
+			if err != nil {
+				return fmt.Errorf("execute statement: %v", err)
 			}
-		}()
-		if processResult != nil {
-			if procErr := processResult(res); procErr != nil {
-				glog.Errorf("doReadQuery (Query API): processResult error: %v", procErr)
-				return fmt.Errorf("process result: %w", procErr)
+			return nil
+		})
+	}
+	if err != nil {
+		return err
+	}
+	if res != nil {
+		defer func() { _ = res.Close(ctx) }()
+		if processResultFunc != nil {
+			if err = processResultFunc(res); err != nil {
+				return fmt.Errorf("process result: %v", err)
 			}
 		}
-		return nil
-	}, query.WithTxSettings(qs))
+	}
+	return err
 }
 
 func (store *YdbStore) insertOrUpdateEntry(ctx context.Context, entry *filer.Entry) (err error) {
