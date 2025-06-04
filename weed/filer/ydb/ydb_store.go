@@ -34,7 +34,7 @@ const (
 	defaultPartitionByLoadEnabled = true
 	defaultMinPartitionsCount     = 5
 	defaultMaxPartitionsCount     = 1000
-	maxChunk                      = 5000
+	defaultMaxListChunk           = 10000
 )
 
 var (
@@ -53,6 +53,7 @@ type YdbStore struct {
 	partitionByLoadEnabled options.FeatureFlag
 	minPartitionsCount     uint64
 	maxPartitionsCount     uint64
+	maxListChunk           int
 	dbs                    map[string]bool
 	dbsLock                sync.Mutex
 }
@@ -71,6 +72,7 @@ func (store *YdbStore) Initialize(configuration util.Configuration, prefix strin
 	configuration.SetDefault(prefix+"partitionByLoadEnabled", defaultPartitionByLoadEnabled)
 	configuration.SetDefault(prefix+"minPartitionsCount", defaultMinPartitionsCount)
 	configuration.SetDefault(prefix+"maxPartitionsCount", defaultMaxPartitionsCount)
+	configuration.SetDefault(prefix+"maxListChunk", defaultMaxListChunk)
 	return store.initialize(
 		configuration.GetString("filer.options.buckets_folder"),
 		configuration.GetString(prefix+"dsn"),
@@ -83,10 +85,11 @@ func (store *YdbStore) Initialize(configuration util.Configuration, prefix strin
 		configuration.GetBool(prefix+"partitionByLoadEnabled"),
 		uint64(configuration.GetInt(prefix+"minPartitionsCount")),
 		uint64(configuration.GetInt(prefix+"maxPartitionsCount")),
+		configuration.GetInt(prefix+"maxListChunk"),
 	)
 }
 
-func (store *YdbStore) initialize(dirBuckets string, dsn string, tablePathPrefix string, useBucketPrefix bool, dialTimeOut int, poolSizeLimit int, partitionBySizeEnabled bool, partitionSizeMb uint64, partitionByLoadEnabled bool, minPartitionsCount uint64, maxPartitionsCount uint64) (err error) {
+func (store *YdbStore) initialize(dirBuckets string, dsn string, tablePathPrefix string, useBucketPrefix bool, dialTimeOut int, poolSizeLimit int, partitionBySizeEnabled bool, partitionSizeMb uint64, partitionByLoadEnabled bool, minPartitionsCount uint64, maxPartitionsCount uint64, maxListChunk int) (err error) {
 	store.dirBuckets = dirBuckets
 	store.SupportBucketTable = useBucketPrefix
 	if partitionBySizeEnabled {
@@ -102,6 +105,7 @@ func (store *YdbStore) initialize(dirBuckets string, dsn string, tablePathPrefix
 	store.partitionSizeMb = partitionSizeMb
 	store.minPartitionsCount = minPartitionsCount
 	store.maxPartitionsCount = maxPartitionsCount
+	store.maxListChunk = maxListChunk
 	if store.SupportBucketTable {
 		glog.V(0).Infof("enabled BucketPrefix")
 	}
@@ -302,8 +306,8 @@ func (store *YdbStore) ListDirectoryPrefixedEntries(ctx context.Context, dirPath
 		}
 		rest := limit - entryCount
 		chunkLimit := rest
-		if chunkLimit > maxChunk {
-			chunkLimit = maxChunk
+		if chunkLimit > defaultMaxListChunk {
+			chunkLimit = defaultMaxListChunk
 		}
 		receivedThisChunk := false
 
@@ -496,7 +500,7 @@ func (store *YdbStore) getPrefix(ctx context.Context, dir *string) (tablePathPre
 				return err3
 			})
 			if err2 != nil {
-				glog.Errorf("bucket %q not found (DescribeTable %s failed): %v", bucket, tablePath, err2)
+				glog.V(4).Infof("bucket %q not found (DescribeTable %s failed)", bucket, tablePath)
 				return
 			}
 			glog.V(4).Infof("bucket %q exists, adding to cache", bucket)
