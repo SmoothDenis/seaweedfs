@@ -39,8 +39,6 @@ const (
 var (
 	roQC = query.WithTxControl(query.OnlineReadOnlyTxControl())
 	rwQC = query.WithTxControl(query.DefaultTxControl())
-	roTX = table.OnlineReadOnlyTxControl()
-	rwTX = table.DefaultTxControl()
 )
 
 type YdbStore struct {
