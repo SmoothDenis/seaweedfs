@@ -51,7 +51,7 @@ type YdbStore struct {
 	partitionByLoadEnabled options.FeatureFlag
 	minPartitionsCount     uint64
 	maxPartitionsCount     uint64
-	maxListChunk           int
+	maxListChunk           uint64
 	dbs                    map[string]bool
 	dbsLock                sync.Mutex
 }
@@ -83,11 +83,11 @@ func (store *YdbStore) Initialize(configuration util.Configuration, prefix strin
 		configuration.GetBool(prefix+"partitionByLoadEnabled"),
 		uint64(configuration.GetInt(prefix+"minPartitionsCount")),
 		uint64(configuration.GetInt(prefix+"maxPartitionsCount")),
-		configuration.GetInt(prefix+"maxListChunk"),
+		uint64(configuration.GetInt(prefix+"maxListChunk")),
 	)
 }
 
-func (store *YdbStore) initialize(dirBuckets string, dsn string, tablePathPrefix string, useBucketPrefix bool, dialTimeOut int, poolSizeLimit int, partitionBySizeEnabled bool, partitionSizeMb uint64, partitionByLoadEnabled bool, minPartitionsCount uint64, maxPartitionsCount uint64, maxListChunk int) (err error) {
+func (store *YdbStore) initialize(dirBuckets string, dsn string, tablePathPrefix string, useBucketPrefix bool, dialTimeOut int, poolSizeLimit int, partitionBySizeEnabled bool, partitionSizeMb uint64, partitionByLoadEnabled bool, minPartitionsCount uint64, maxPartitionsCount uint64, maxListChunk uint64) (err error) {
 	store.dirBuckets = dirBuckets
 	store.SupportBucketTable = useBucketPrefix
 	if partitionBySizeEnabled {
@@ -278,8 +278,8 @@ func (store *YdbStore) ListDirectoryPrefixedEntries(ctx context.Context, dirPath
 		}
 		rest := limit - entryCount
 		chunkLimit := rest
-		if chunkLimit > defaultMaxListChunk {
-			chunkLimit = defaultMaxListChunk
+		if chunkLimit > int64(store.maxListChunk) {
+			chunkLimit = int64(store.maxListChunk)
 		}
 		var rowCount int64
 
