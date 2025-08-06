@@ -217,7 +217,7 @@ func (iam *IdentityAccessManagement) doesSignatureMatch(hashedPayload string, r 
 	stringToSign := getStringToSign(canonicalRequest, t, signV4Values.Credential.getScope())
 
 	// Get hmac signing key.
-	signingKey := getSigningKey(foundCred.SecretKey, signV4Values.Credential.scope.date.Format(yyyymmdd), signV4Values.Credential.scope.region, "s3")
+	signingKey := getSigningKey(secretKey, signV4Values.Credential.scope.date.Format(yyyymmdd), signV4Values.Credential.scope.region, signV4Values.Credential.scope.service)
 
 	// Calculate signature.
 	newSignature := getSignature(signingKey, stringToSign)
@@ -227,8 +227,29 @@ func (iam *IdentityAccessManagement) doesSignatureMatch(hashedPayload string, r 
 		return nil, s3err.ErrSignatureDoesNotMatch
 	}
 
-	// Return error none.
-	return identity, s3err.ErrNone
+	return s3err.ErrNone
+}
+
+// verifyPresignedSignatureWithPath verifies presigned signature with a given path (used for both normal and prefixed paths).
+func (iam *IdentityAccessManagement) verifyPresignedSignatureWithPath(extractedSignedHeaders http.Header, hashedPayload, queryStr, urlPath, method, secretKey string, t time.Time, credHeader credentialHeader, signature string) s3err.ErrorCode {
+	// Get canonical request.
+	canonicalRequest := getCanonicalRequest(extractedSignedHeaders, hashedPayload, queryStr, urlPath, method)
+
+	// Get string to sign from canonical request.
+	stringToSign := getStringToSign(canonicalRequest, t, credHeader.getScope())
+
+	// Get hmac signing key.
+	signingKey := getSigningKey(secretKey, credHeader.scope.date.Format(yyyymmdd), credHeader.scope.region, credHeader.scope.service)
+
+	// Calculate expected signature.
+	expectedSignature := getSignature(signingKey, stringToSign)
+
+	// Verify if signature match.
+	if !compareSignatureV4(expectedSignature, signature) {
+		return s3err.ErrSignatureDoesNotMatch
+	}
+
+	return s3err.ErrNone
 }
 
 // Simple implementation for presigned signature verification
@@ -441,7 +462,7 @@ func (iam *IdentityAccessManagement) doesPolicySignatureV4Match(formValues http.
 	}
 
 	// Get signing key.
-	signingKey := getSigningKey(cred.SecretKey, credHeader.scope.date.Format(yyyymmdd), credHeader.scope.region, "s3")
+	signingKey := getSigningKey(cred.SecretKey, credHeader.scope.date.Format(yyyymmdd), credHeader.scope.region, credHeader.scope.service)
 
 	// Get signature.
 	newSignature := getSignature(signingKey, formValues.Get("Policy"))
@@ -508,11 +529,11 @@ func extractHostHeader(r *http.Request) string {
 }
 
 // getScope generate a string of a specific date, an AWS region, and a service.
-func getScope(t time.Time, region string) string {
+func getScope(t time.Time, region string, service string) string {
 	scope := strings.Join([]string{
 		t.Format(yyyymmdd),
 		region,
-		"s3",
+		service,
 		"aws4_request",
 	}, "/")
 	return scope
