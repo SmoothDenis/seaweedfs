@@ -599,6 +599,403 @@ func TestExtractValidNeedles(t *testing.T) {
 	}
 }
 
+// --- Integration tests: realistic needle format matching real SeaweedFS ---
+
+const (
+	flagHasName             = 0x02
+	flagHasMime             = 0x04
+	flagHasLastModifiedDate = 0x08
+	flagHasTtl              = 0x10
+	flagHasPairs            = 0x20
+)
+
+// buildRealisticNeedleV3 creates a V3 needle with metadata fields exactly as
+// real SeaweedFS writes them: DataSize + Data + Flags + [Name] + [Mime] + [LastMod] + [TTL] + [Pairs].
+// CRC is computed over Data only (matching real SeaweedFS).
+func buildRealisticNeedleV3(cookie uint32, needleId uint64, data []byte, name string, mime string, lastMod uint64, hasTTL bool, pairs []byte) []byte {
+	dataSize := uint32(len(data))
+
+	// Build body: DataSize(4) + Data(N) + Flags(1) + optional fields
+	var flags byte
+	body := make([]byte, 0, 4+len(data)+1+1+len(name)+1+len(mime)+5+2+2+len(pairs))
+
+	// DataSize
+	ds := make([]byte, 4)
+	binary.BigEndian.PutUint32(ds, dataSize)
+	body = append(body, ds...)
+
+	// Data
+	body = append(body, data...)
+
+	// Flags
+	if len(name) > 0 {
+		flags |= flagHasName
+	}
+	if len(mime) > 0 {
+		flags |= flagHasMime
+	}
+	if lastMod > 0 {
+		flags |= flagHasLastModifiedDate
+	}
+	if hasTTL {
+		flags |= flagHasTtl
+	}
+	if len(pairs) > 0 {
+		flags |= flagHasPairs
+	}
+	body = append(body, flags)
+
+	// Name
+	if len(name) > 0 {
+		body = append(body, byte(len(name)))
+		body = append(body, []byte(name)...)
+	}
+
+	// Mime
+	if len(mime) > 0 {
+		body = append(body, byte(len(mime)))
+		body = append(body, []byte(mime)...)
+	}
+
+	// LastModified (5 bytes from uint64, bytes 3-7)
+	if lastMod > 0 {
+		lm := make([]byte, 8)
+		binary.BigEndian.PutUint64(lm, lastMod)
+		body = append(body, lm[3:8]...)
+	}
+
+	// TTL (2 bytes: count + unit)
+	if hasTTL {
+		body = append(body, 5, 2) // 5 minutes
+	}
+
+	// Pairs
+	if len(pairs) > 0 {
+		ps := make([]byte, 2)
+		binary.BigEndian.PutUint16(ps, uint16(len(pairs)))
+		body = append(body, ps...)
+		body = append(body, pairs...)
+	}
+
+	bodySize := int32(len(body))
+
+	// Header
+	header := make([]byte, NeedleHeaderSize)
+	binary.BigEndian.PutUint32(header[0:4], cookie)
+	binary.BigEndian.PutUint64(header[4:12], needleId)
+	binary.BigEndian.PutUint32(header[12:16], uint32(bodySize))
+
+	// CRC over Data only (matching real SeaweedFS)
+	crc := crc32.Update(0, testCRC32cTable, data)
+	tail := make([]byte, NeedleChecksumSize+TimestampSize)
+	binary.BigEndian.PutUint32(tail[0:4], crc)
+	binary.BigEndian.PutUint64(tail[4:12], 1700000000_000_000_000)
+
+	raw := make([]byte, 0, NeedleHeaderSize+int(bodySize)+len(tail)+NeedlePaddingSize)
+	raw = append(raw, header...)
+	raw = append(raw, body...)
+	raw = append(raw, tail...)
+
+	// Padding (1-8 bytes, matching SeaweedFS)
+	padLen := PaddingLength(bodySize, 3)
+	raw = append(raw, make([]byte, padLen)...)
+
+	return raw
+}
+
+// buildNeedleV2 creates a V2 needle (no timestamp in tail).
+func buildNeedleV2(cookie uint32, needleId uint64, data []byte) []byte {
+	dataSize := uint32(len(data))
+	bodySize := int32(4 + dataSize + 1) // DataSize + Data + Flags
+
+	header := make([]byte, NeedleHeaderSize)
+	binary.BigEndian.PutUint32(header[0:4], cookie)
+	binary.BigEndian.PutUint64(header[4:12], needleId)
+	binary.BigEndian.PutUint32(header[12:16], uint32(bodySize))
+
+	body := make([]byte, bodySize)
+	binary.BigEndian.PutUint32(body[0:4], dataSize)
+	copy(body[4:4+dataSize], data)
+	body[4+dataSize] = 0x00
+
+	crc := crc32.Update(0, testCRC32cTable, data)
+	tail := make([]byte, NeedleChecksumSize) // V2: no timestamp
+	binary.BigEndian.PutUint32(tail[0:4], crc)
+
+	raw := make([]byte, 0, NeedleHeaderSize+int(bodySize)+NeedleChecksumSize+NeedlePaddingSize)
+	raw = append(raw, header...)
+	raw = append(raw, body...)
+	raw = append(raw, tail...)
+
+	padLen := PaddingLength(bodySize, 2)
+	raw = append(raw, make([]byte, padLen)...)
+
+	return raw
+}
+
+func buildSuperBlockV2() []byte {
+	sb := make([]byte, SuperBlockSize)
+	sb[0] = 2 // version 2
+	return sb
+}
+
+func writeDatFileWithSuperBlock(t *testing.T, dir string, sb []byte, needles ...[]byte) string {
+	t.Helper()
+	path := filepath.Join(dir, "test.dat")
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if _, err := f.Write(sb); err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range needles {
+		if _, err := f.Write(n); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return path
+}
+
+// TestRealisticV3NeedlesWithMetadata tests scanning needles that have
+// Name, Mime, LastModified, TTL, and Pairs - exactly like real SeaweedFS volumes.
+func TestRealisticV3NeedlesWithMetadata(t *testing.T) {
+	dir := t.TempDir()
+
+	n1 := buildRealisticNeedleV3(0xAABBCCDD, 1,
+		[]byte("Hello, World!"),           // data
+		"greeting.txt",                    // name
+		"text/plain",                      // mime
+		1700000000,                        // lastModified
+		false,                             // ttl
+		nil,                               // pairs
+	)
+	n2 := buildRealisticNeedleV3(0x11223344, 2,
+		[]byte(`{"key": "value"}`),        // data
+		"config.json",                     // name
+		"application/json",                // mime
+		1700000001,                        // lastModified
+		true,                              // ttl
+		[]byte(`{"upload":"direct"}`),     // pairs
+	)
+	n3 := buildRealisticNeedleV3(0x55667788, 3,
+		[]byte{0x89, 0x50, 0x4E, 0x47},   // data (fake PNG header)
+		"image.png",                       // name
+		"image/png",                       // mime
+		1700000002,                        // lastModified
+		false,                             // ttl
+		nil,                               // pairs
+	)
+
+	datPath := writeDatFile(t, dir, n1, n2, n3)
+
+	scanner := NewScanner(datPath)
+	result, err := scanner.Run()
+	if err != nil {
+		t.Fatalf("scan failed: %v", err)
+	}
+
+	if result.Stats.TotalNeedles != 3 {
+		t.Errorf("expected 3 needles, got %d", result.Stats.TotalNeedles)
+	}
+	if result.Stats.ValidNeedles != 3 {
+		t.Errorf("expected 3 valid needles, got %d", result.Stats.ValidNeedles)
+	}
+	if len(result.CorruptionGaps) != 0 {
+		t.Errorf("expected 0 corruption gaps, got %d", len(result.CorruptionGaps))
+	}
+
+	// Verify each needle
+	for i, rec := range result.Records {
+		if rec.Status != StatusValid {
+			t.Errorf("needle %d (id=%d): expected VALID, got %s", i, rec.NeedleId, rec.Status)
+		}
+		if rec.ComputedCRC != rec.StoredCRC {
+			t.Errorf("needle %d (id=%d): CRC mismatch computed=%x stored=%x", i, rec.NeedleId, rec.ComputedCRC, rec.StoredCRC)
+		}
+	}
+
+	// Verify data sizes match the actual data (not body+metadata)
+	expectedDataSizes := []uint32{13, 16, 4} // "Hello, World!", `{"key": "value"}`, 4 bytes PNG
+	for i, rec := range result.Records {
+		if rec.DataSize != expectedDataSizes[i] {
+			t.Errorf("needle %d: expected dataSize %d, got %d", i, expectedDataSizes[i], rec.DataSize)
+		}
+	}
+}
+
+// TestV2Volume tests scanning a Version 2 volume (no timestamp in tail).
+func TestV2Volume(t *testing.T) {
+	dir := t.TempDir()
+	n1 := buildNeedleV2(0xAAAAAAAA, 1, []byte("v2 data one"))
+	n2 := buildNeedleV2(0xBBBBBBBB, 2, []byte("v2 data two"))
+	n3 := buildNeedleV2(0xCCCCCCCC, 3, []byte("v2 data three"))
+
+	datPath := writeDatFileWithSuperBlock(t, dir, buildSuperBlockV2(), n1, n2, n3)
+
+	scanner := NewScanner(datPath)
+	result, err := scanner.Run()
+	if err != nil {
+		t.Fatalf("scan failed: %v", err)
+	}
+
+	if result.Version != 2 {
+		t.Errorf("expected version 2, got %d", result.Version)
+	}
+	if result.Stats.TotalNeedles != 3 {
+		t.Errorf("expected 3 needles, got %d", result.Stats.TotalNeedles)
+	}
+	if result.Stats.ValidNeedles != 3 {
+		t.Errorf("expected 3 valid, got %d", result.Stats.ValidNeedles)
+	}
+	if len(result.CorruptionGaps) != 0 {
+		t.Errorf("expected 0 corruption gaps, got %d", len(result.CorruptionGaps))
+	}
+}
+
+// TestV2CorruptionRecovery tests that the rescue tool can recover from
+// corruption in V2 volumes.
+func TestV2CorruptionRecovery(t *testing.T) {
+	dir := t.TempDir()
+	n1 := buildNeedleV2(0xAAAAAAAA, 1, []byte("keep me v2"))
+	n2 := buildNeedleV2(0xBBBBBBBB, 2, []byte("corrupt me v2"))
+	n3 := buildNeedleV2(0xCCCCCCCC, 3, []byte("keep me too v2"))
+
+	datPath := writeDatFileWithSuperBlock(t, dir, buildSuperBlockV2(), n1, n2, n3)
+
+	// Corrupt needle 2
+	f, _ := os.OpenFile(datPath, os.O_RDWR, 0644)
+	corruptOffset := int64(SuperBlockSize + len(n1))
+	garbage := make([]byte, len(n2))
+	for i := range garbage {
+		garbage[i] = 0xFE
+	}
+	f.WriteAt(garbage, corruptOffset)
+	f.Close()
+
+	scanner := NewScanner(datPath)
+	result, err := scanner.Run()
+	if err != nil {
+		t.Fatalf("scan failed: %v", err)
+	}
+
+	foundIds := make(map[uint64]bool)
+	for _, rec := range result.Records {
+		if rec.Status == StatusValid {
+			foundIds[rec.NeedleId] = true
+		}
+	}
+	if !foundIds[1] {
+		t.Error("needle 1 not found")
+	}
+	if !foundIds[3] {
+		t.Error("needle 3 not recovered after corruption gap in V2 volume")
+	}
+	if len(result.CorruptionGaps) == 0 {
+		t.Error("expected corruption gap in V2 volume")
+	}
+}
+
+// TestRealisticNeedleExtractWithMetadata tests that extract preserves
+// needles with metadata correctly.
+func TestRealisticNeedleExtractWithMetadata(t *testing.T) {
+	dir := t.TempDir()
+
+	n1 := buildRealisticNeedleV3(0xAABBCCDD, 1,
+		[]byte("important data"),
+		"document.txt", "text/plain", 1700000000, true, []byte(`{"source":"api"}`))
+	n2 := buildRealisticNeedleV3(0x11223344, 2,
+		[]byte("corrupt this"),
+		"bad.txt", "text/plain", 1700000001, false, nil)
+	n3 := buildRealisticNeedleV3(0x55667788, 3,
+		[]byte("also important"),
+		"another.txt", "text/plain", 1700000002, false, nil)
+
+	datPath := writeDatFile(t, dir, n1, n2, n3)
+
+	// Corrupt needle 2
+	f, _ := os.OpenFile(datPath, os.O_RDWR, 0644)
+	f.WriteAt(make([]byte, 16), int64(SuperBlockSize+len(n1)))
+	f.Close()
+
+	scanner := NewScanner(datPath)
+	result, err := scanner.Run()
+	if err != nil {
+		t.Fatalf("scan failed: %v", err)
+	}
+
+	// Extract valid needles
+	extractPath := filepath.Join(dir, "extracted.dat")
+	count, err := ExtractValidNeedles(datPath, result, extractPath)
+	if err != nil {
+		t.Fatalf("extract failed: %v", err)
+	}
+	if count < 2 {
+		t.Errorf("expected at least 2 extracted, got %d", count)
+	}
+
+	// Re-scan extracted file
+	scanner2 := NewScanner(extractPath)
+	result2, err := scanner2.Run()
+	if err != nil {
+		t.Fatalf("scan extracted failed: %v", err)
+	}
+	if result2.Stats.ValidNeedles < 2 {
+		t.Errorf("extracted file: expected at least 2 valid, got %d", result2.Stats.ValidNeedles)
+	}
+	if len(result2.CorruptionGaps) != 0 {
+		t.Errorf("extracted file should have 0 corruption gaps")
+	}
+}
+
+// TestAlignedSizeNeedles tests needles whose total size (before padding)
+// is already 8-byte aligned - this was a bug where padding was incorrectly 0.
+func TestAlignedSizeNeedles(t *testing.T) {
+	dir := t.TempDir()
+
+	// Craft data sizes that cause aligned totals.
+	// For V3: total = 16 + bodySize + 4 + 8 = 28 + bodySize
+	// bodySize = 4 + dataLen + 1 (DataSize + Data + Flags)
+	// total = 28 + 4 + dataLen + 1 = 33 + dataLen
+	// For total % 8 == 0: dataLen = 7 (total=40), dataLen = 15 (total=48), etc.
+	// bodySize for dataLen=7: 12. Padding = 8 - ((28+12)%8) = 8 - (40%8) = 8 - 0 = 8
+
+	data7 := []byte("1234567")                // 7 bytes -> bodySize=12, total=40, padding=8
+	data15 := []byte("123456789012345")        // 15 bytes -> bodySize=20, total=48, padding=8
+
+	n1 := buildNeedleV3(0x11111111, 1, data7)
+	n2 := buildNeedleV3(0x22222222, 2, data15)
+	n3 := buildNeedleV3(0x33333333, 3, []byte("after aligned"))
+
+	datPath := writeDatFile(t, dir, n1, n2, n3)
+
+	scanner := NewScanner(datPath)
+	result, err := scanner.Run()
+	if err != nil {
+		t.Fatalf("scan failed: %v", err)
+	}
+
+	if result.Stats.TotalNeedles != 3 {
+		t.Errorf("expected 3 needles, got %d", result.Stats.TotalNeedles)
+	}
+	if result.Stats.ValidNeedles != 3 {
+		t.Errorf("expected 3 valid, got %d (padding bug?)", result.Stats.ValidNeedles)
+	}
+	if len(result.CorruptionGaps) != 0 {
+		t.Errorf("expected 0 corruption gaps, got %d (padding calculation error)", len(result.CorruptionGaps))
+	}
+
+	// Verify all 3 needle IDs found
+	foundIds := make(map[uint64]bool)
+	for _, rec := range result.Records {
+		foundIds[rec.NeedleId] = true
+	}
+	if !foundIds[1] || !foundIds[2] || !foundIds[3] {
+		t.Errorf("not all needles found: %v", foundIds)
+	}
+}
+
 func TestActualDiskSize(t *testing.T) {
 	// V3: header(16) + body(size) + checksum(4) + timestamp(8) + padding(1-8)
 	// SeaweedFS padding is always 1-8 bytes, never 0.
