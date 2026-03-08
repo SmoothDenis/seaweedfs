@@ -98,7 +98,11 @@ func (s *Scanner) Run() (*ScanResult, error) {
 	// Phase 2: sequential scan with recovery
 	s.log("[phase 2/3] sequential scan of %s...", humanSize(s.datSize))
 	s.phase2Sequential(result)
-	s.log("[phase 2/3] done: found %d needles, %d corruption gaps", len(result.Records), len(result.CorruptionGaps))
+	if len(result.CorruptionGaps) == 0 {
+		s.log("[phase 2/3] done: %d needles, no corruption", len(result.Records))
+	} else {
+		s.log("[phase 2/3] done: %d needles found, %d corruption gaps detected", len(result.Records), len(result.CorruptionGaps))
+	}
 
 	// Phase 3: deep scan (optional)
 	if s.DeepScan && len(result.CorruptionGaps) > 0 {
@@ -170,12 +174,17 @@ func (s *Scanner) phase2Sequential(result *ScanResult) {
 				result.Records = append(result.Records, *rec)
 				seenOffsets[offset] = true
 			}
+			if rec.Status == StatusCorruptedData {
+				s.log("  CRC MISMATCH at offset %d: needle id=%d, stored=%08x computed=%08x (data corrupted but header intact)",
+					offset, rec.NeedleId, rec.StoredCRC, rec.ComputedCRC)
+			}
 			offset += rec.ActualDiskSize(s.Version)
 			continue
 		}
 
 		// Corruption detected - scan forward for next valid needle
 		gapStart := offset
+		s.log("  CORRUPTION at offset %d: invalid needle header or bad CRC", offset)
 		found := false
 		scanOffset := offset + NeedlePaddingSize
 
@@ -183,10 +192,10 @@ func (s *Scanner) phase2Sequential(result *ScanResult) {
 			candidate := s.validateAtOffset(scanOffset)
 			if candidate != nil && candidate.Status == StatusValid {
 				// Found next valid needle
-				result.CorruptionGaps = append(result.CorruptionGaps, Gap{
-					StartOffset: gapStart,
-					EndOffset:   scanOffset,
-				})
+				gap := Gap{StartOffset: gapStart, EndOffset: scanOffset}
+				result.CorruptionGaps = append(result.CorruptionGaps, gap)
+				s.log("  RECOVERED at offset %d: found valid needle id=%d after %s gap (offsets %d-%d)",
+					scanOffset, candidate.NeedleId, humanSize(gap.Size()), gapStart, scanOffset)
 				candidate.Source = "sequential"
 				if s.idxEntries != nil {
 					if idxEntry, ok := s.idxEntries[candidate.NeedleId]; ok && idxEntry.Offset == scanOffset {
@@ -206,10 +215,9 @@ func (s *Scanner) phase2Sequential(result *ScanResult) {
 
 		if !found {
 			// Rest of file is corrupted
-			result.CorruptionGaps = append(result.CorruptionGaps, Gap{
-				StartOffset: gapStart,
-				EndOffset:   s.datSize,
-			})
+			gap := Gap{StartOffset: gapStart, EndOffset: s.datSize}
+			result.CorruptionGaps = append(result.CorruptionGaps, gap)
+			s.log("  LOST tail of volume: %s corrupted from offset %d to end of file", humanSize(gap.Size()), gapStart)
 			break
 		}
 	}
@@ -221,7 +229,8 @@ func (s *Scanner) phase3Deep(result *ScanResult) {
 		seenOffsets[rec.Offset] = true
 	}
 
-	for _, gap := range result.CorruptionGaps {
+	for i, gap := range result.CorruptionGaps {
+		recoveredInGap := 0
 		for offset := gap.StartOffset; offset < gap.EndOffset; offset += NeedlePaddingSize {
 			if seenOffsets[offset] {
 				continue
@@ -237,7 +246,14 @@ func (s *Scanner) phase3Deep(result *ScanResult) {
 				}
 				result.Records = append(result.Records, *rec)
 				seenOffsets[offset] = true
+				recoveredInGap++
+				s.log("  deep-scan: recovered needle id=%d (dataSize=%d) at offset %d inside gap %d",
+					rec.NeedleId, rec.DataSize, offset, i+1)
 			}
+		}
+		if recoveredInGap == 0 {
+			s.log("  deep-scan: gap %d (offsets %d-%d, %s) — no recoverable needles found",
+				i+1, gap.StartOffset, gap.EndOffset, humanSize(gap.Size()))
 		}
 	}
 }

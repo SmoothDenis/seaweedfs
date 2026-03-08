@@ -63,6 +63,11 @@ func ValidateNeedleAtOffset(data []byte, offset int64, version int) (NeedleRecor
 
 	// Deleted needle
 	if rec.Size <= 0 {
+		// Sanity: NeedleId must be nonzero and not all-ones (garbage pattern)
+		if rec.NeedleId == 0 || rec.NeedleId == 0xFFFFFFFFFFFFFFFF {
+			rec.Status = StatusCorruptedHeader
+			return rec, false
+		}
 		rec.Status = StatusDeleted
 		return rec, true
 	}
