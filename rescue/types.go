@@ -107,42 +107,23 @@ const (
 )
 
 // PaddingLength computes padding bytes needed to align needle to 8-byte boundary.
+// Matches SeaweedFS: padding is always 1-8 bytes, never 0.
 func PaddingLength(size int32, version int) int {
-	var tailSize int
-	switch version {
-	case 2:
-		tailSize = NeedleChecksumSize
-	case 3:
-		tailSize = NeedleChecksumSize + TimestampSize
-	default:
-		tailSize = NeedleChecksumSize + TimestampSize
+	if version == 3 {
+		return int(NeedlePaddingSize - ((NeedleHeaderSize + int(absInt32(size)) + NeedleChecksumSize + TimestampSize) % NeedlePaddingSize))
 	}
-	total := NeedleHeaderSize + int(absInt32(size)) + tailSize
-	remainder := total % NeedlePaddingSize
-	if remainder == 0 {
-		return 0
-	}
-	return NeedlePaddingSize - remainder
+	return int(NeedlePaddingSize - ((NeedleHeaderSize + int(absInt32(size)) + NeedleChecksumSize) % NeedlePaddingSize))
 }
 
 // ActualDiskSize returns total bytes a needle occupies on disk.
+// Matches SeaweedFS GetActualSize: Header + Size + Checksum + Timestamp(V3) + Padding(1-8).
 func ActualDiskSize(size int32, version int) int64 {
-	absSize := absInt32(size)
-	var tailSize int
-	switch version {
-	case 2:
-		tailSize = NeedleChecksumSize
-	case 3:
-		tailSize = NeedleChecksumSize + TimestampSize
-	default:
-		tailSize = NeedleChecksumSize + TimestampSize
+	absSize := int64(absInt32(size))
+	padding := int64(PaddingLength(size, version))
+	if version == 3 {
+		return int64(NeedleHeaderSize) + absSize + NeedleChecksumSize + TimestampSize + padding
 	}
-	total := NeedleHeaderSize + int(absSize) + tailSize
-	padding := NeedlePaddingSize - (total % NeedlePaddingSize)
-	if padding == NeedlePaddingSize {
-		padding = 0
-	}
-	return int64(total + padding)
+	return int64(NeedleHeaderSize) + absSize + NeedleChecksumSize + padding
 }
 
 func absInt32(v int32) int32 {

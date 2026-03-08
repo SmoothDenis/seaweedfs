@@ -379,9 +379,9 @@ func TestPaddingLength(t *testing.T) {
 			t.Errorf("size=%d version=%d: disk size %d not 8-byte aligned (pad=%d)", tt.size, tt.version, diskSize, pad)
 		}
 
-		// Verify padding is 0-7
-		if pad < 0 || pad >= NeedlePaddingSize {
-			t.Errorf("size=%d version=%d: invalid padding %d", tt.size, tt.version, pad)
+		// SeaweedFS padding is always 1-8, never 0
+		if pad < 1 || pad > NeedlePaddingSize {
+			t.Errorf("size=%d version=%d: invalid padding %d (expected 1-8)", tt.size, tt.version, pad)
 		}
 	}
 }
@@ -600,8 +600,10 @@ func TestExtractValidNeedles(t *testing.T) {
 }
 
 func TestActualDiskSize(t *testing.T) {
-	// V3: header(16) + body(size) + checksum(4) + timestamp(8) + padding
-	// For size=10: 16 + 10 + 4 + 8 = 38, pad to 40
+	// V3: header(16) + body(size) + checksum(4) + timestamp(8) + padding(1-8)
+	// SeaweedFS padding is always 1-8 bytes, never 0.
+
+	// size=10: 16 + 10 + 4 + 8 = 38, pad = 8-(38%8) = 8-6 = 2, total = 40
 	ds := ActualDiskSize(10, 3)
 	if ds%8 != 0 {
 		t.Errorf("disk size %d not 8-byte aligned", ds)
@@ -610,9 +612,34 @@ func TestActualDiskSize(t *testing.T) {
 		t.Errorf("expected 40, got %d", ds)
 	}
 
-	// For size=0: 16 + 0 + 4 + 8 = 28, pad to 32
+	// size=0: 16 + 0 + 4 + 8 = 28, pad = 8-(28%8) = 8-4 = 4, total = 32
 	ds0 := ActualDiskSize(0, 3)
 	if ds0 != 32 {
 		t.Errorf("expected 32 for size=0, got %d", ds0)
+	}
+
+	// size=4: 16 + 4 + 4 + 8 = 32, pad = 8-(32%8) = 8-0 = 8, total = 40
+	// This is the key case: SeaweedFS padding never returns 0.
+	ds4 := ActualDiskSize(4, 3)
+	if ds4 != 40 {
+		t.Errorf("expected 40 for size=4 (padding=8 when aligned), got %d", ds4)
+	}
+
+	// size=12: 16 + 12 + 4 + 8 = 40, pad = 8-(40%8) = 8, total = 48
+	ds12 := ActualDiskSize(12, 3)
+	if ds12 != 48 {
+		t.Errorf("expected 48 for size=12, got %d", ds12)
+	}
+
+	// V2: size=10: 16 + 10 + 4 = 30, pad = 8-(30%8) = 8-6 = 2, total = 32
+	dsV2 := ActualDiskSize(10, 2)
+	if dsV2 != 32 {
+		t.Errorf("expected 32 for V2 size=10, got %d", dsV2)
+	}
+
+	// V2: size=4: 16 + 4 + 4 = 24, pad = 8-(24%8) = 8-0 = 8, total = 32
+	dsV2_4 := ActualDiskSize(4, 2)
+	if dsV2_4 != 32 {
+		t.Errorf("expected 32 for V2 size=4, got %d", dsV2_4)
 	}
 }
