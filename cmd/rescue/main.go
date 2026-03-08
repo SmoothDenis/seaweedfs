@@ -18,6 +18,7 @@ func main() {
 	jsonOutput := flag.Bool("json", false, "output results as JSON")
 	quiet := flag.Bool("quiet", false, "suppress progress logging (only output report)")
 	includeCorrupted := flag.Bool("include-corrupted", false, "include corrupted-data needles in extract (data may be partially damaged)")
+	repair := flag.Bool("repair", false, "attempt single-byte CRC repair on corrupted needles and extract repaired data")
 
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: weed-rescue [flags] <path-to-dat-file>\n\n")
@@ -53,13 +54,23 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Detect file signatures in corruption gaps
+	var gapSigs []rescue.GapSignature
+	if len(result.CorruptionGaps) > 0 {
+		datFile, err := os.Open(datPath)
+		if err == nil {
+			gapSigs = rescue.DetectSignaturesInGaps(datFile, result.CorruptionGaps)
+			datFile.Close()
+		}
+	}
+
 	if *jsonOutput {
 		if err := rescue.PrintJSON(os.Stdout, result); err != nil {
 			fmt.Fprintf(os.Stderr, "Error writing JSON: %v\n", err)
 			os.Exit(1)
 		}
 	} else {
-		rescue.PrintReport(os.Stdout, result, *verbose)
+		rescue.PrintReport(os.Stdout, result, *verbose, gapSigs)
 	}
 
 	// Rebuild .idx if requested
@@ -74,7 +85,7 @@ func main() {
 	}
 
 	// Extract valid data if requested
-	if *extractPath != "" {
+	if *extractPath != "" && !*repair {
 		count, err := rescue.ExtractValidNeedles(datPath, result, *extractPath, *includeCorrupted)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error extracting: %v\n", err)
@@ -82,6 +93,26 @@ func main() {
 		}
 		idxOutPath := (*extractPath)[:len(*extractPath)-4] + ".idx"
 		fmt.Fprintf(os.Stderr, "\nExtracted %d valid needles to %s (idx: %s)\n", count, *extractPath, idxOutPath)
+	}
+
+	// Repair + extract
+	if *repair && *extractPath != "" {
+		var logger rescue.Logger
+		if !*quiet {
+			logger = func(format string, args ...interface{}) {
+				fmt.Fprintf(os.Stderr, format+"\n", args...)
+			}
+		}
+		extracted, repaired, err := rescue.RepairAndExtract(datPath, result, *extractPath, logger)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error during repair+extract: %v\n", err)
+			os.Exit(1)
+		}
+		idxOutPath := (*extractPath)[:len(*extractPath)-4] + ".idx"
+		fmt.Fprintf(os.Stderr, "\nRepaired %d needles, extracted %d total to %s (idx: %s)\n", repaired, extracted, *extractPath, idxOutPath)
+	} else if *repair && *extractPath == "" {
+		fmt.Fprintf(os.Stderr, "Error: --repair requires --extract <path.dat>\n")
+		os.Exit(1)
 	}
 
 	// Exit with non-zero if corruption was found

@@ -306,6 +306,8 @@ func (s *Scanner) computeStats(result *ScanResult) {
 		case StatusRecovered:
 			result.Stats.Recovered++
 			result.Stats.BytesRecovered += rec.ActualDiskSize(result.Version)
+		case StatusRepaired:
+			result.Stats.Repaired++
 		}
 	}
 	result.Stats.BytesScanned = result.DatFileSize

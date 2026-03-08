@@ -6,7 +6,7 @@ import (
 	"io"
 )
 
-func PrintReport(w io.Writer, result *ScanResult, verbose bool) {
+func PrintReport(w io.Writer, result *ScanResult, verbose bool, signatures ...[]GapSignature) {
 	fmt.Fprintf(w, "=== SeaweedFS Volume Rescue Report ===\n\n")
 	fmt.Fprintf(w, "File size:       %s (%d bytes)\n", humanSize(result.DatFileSize), result.DatFileSize)
 	fmt.Fprintf(w, "Needle version:  %d\n", result.Version)
@@ -17,6 +17,9 @@ func PrintReport(w io.Writer, result *ScanResult, verbose bool) {
 	fmt.Fprintf(w, "  Corrupted data: %d\n", result.Stats.CorruptedData)
 	fmt.Fprintf(w, "  Corrupted hdr:  %d\n", result.Stats.CorruptedHeader)
 	fmt.Fprintf(w, "  Recovered:      %d\n", result.Stats.Recovered)
+	if result.Stats.Repaired > 0 {
+		fmt.Fprintf(w, "  Repaired:       %d\n", result.Stats.Repaired)
+	}
 
 	if result.Stats.IdxEntries > 0 {
 		fmt.Fprintf(w, "\n--- IDX Cross-Reference ---\n")
@@ -42,6 +45,14 @@ func PrintReport(w io.Writer, result *ScanResult, verbose bool) {
 			fmt.Fprintf(w, "  Gap %d: offset %d - %d (%s)\n", i+1, gap.StartOffset, gap.EndOffset, humanSize(gap.Size()))
 		}
 		fmt.Fprintf(w, "Total corrupted: %s\n", humanSize(result.Stats.BytesCorrupted))
+
+		// Show file signatures found in gaps (if provided)
+		if len(signatures) > 0 && len(signatures[0]) > 0 {
+			fmt.Fprintf(w, "\n--- File Signatures in Gaps (what was lost) ---\n")
+			for _, sig := range signatures[0] {
+				fmt.Fprintf(w, "  Gap %d, offset %d: %s\n", sig.GapIndex+1, sig.Offset, sig.FileType)
+			}
+		}
 	}
 
 	if result.Stats.CorruptedData == 0 && len(result.CorruptionGaps) == 0 {
@@ -88,8 +99,10 @@ func PrintReport(w io.Writer, result *ScanResult, verbose bool) {
 			fmt.Fprintf(w, "  # Extract %d valid needles to a clean .dat + .idx\n", recoverable)
 		}
 		if result.Stats.CorruptedData > 0 {
+			fmt.Fprintf(w, "  weed-rescue --repair --extract repaired.dat %s\n", result.datPath)
+			fmt.Fprintf(w, "  # Try to fix %d corrupted needles (single-byte repair) and extract all recoverable data\n", result.Stats.CorruptedData)
 			fmt.Fprintf(w, "  weed-rescue --extract recovered.dat --include-corrupted %s\n", result.datPath)
-			fmt.Fprintf(w, "  # Same but also include %d corrupted needles (data may be partially damaged)\n", result.Stats.CorruptedData)
+			fmt.Fprintf(w, "  # Extract including corrupted needles as-is (no repair, data may be partially damaged)\n")
 		}
 		fmt.Fprintf(w, "  weed-rescue --rebuildIdx %s\n", result.datPath)
 		fmt.Fprintf(w, "  # Rebuild .idx from %d entries found in the .dat\n", totalUseful)

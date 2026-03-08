@@ -10,6 +10,7 @@ const (
 	StatusCorruptedHeader                   // Header unreadable / invalid size
 	StatusRecovered                         // Found via deep scan
 	StatusDeleted                           // Size < 0 (tombstone)
+	StatusRepaired                          // CRC mismatch fixed by single-byte repair
 )
 
 func (s NeedleStatus) String() string {
@@ -24,6 +25,8 @@ func (s NeedleStatus) String() string {
 		return "RECOVERED"
 	case StatusDeleted:
 		return "DELETED"
+	case StatusRepaired:
+		return "REPAIRED"
 	default:
 		return fmt.Sprintf("UNKNOWN(%d)", int(s))
 	}
@@ -64,6 +67,7 @@ type ScanStats struct {
 	CorruptedData   int
 	CorruptedHeader int
 	Recovered       int
+	Repaired        int
 	BytesScanned    int64
 	BytesCorrupted  int64
 	BytesRecovered  int64
