@@ -4,7 +4,12 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"time"
 )
+
+// Logger is a callback for progress/diagnostic messages.
+// If nil, no logging is performed.
+type Logger func(format string, args ...interface{})
 
 type Scanner struct {
 	DatPath    string
@@ -12,9 +17,16 @@ type Scanner struct {
 	Version    int
 	DeepScan   bool
 	Verbose    bool
+	Log        Logger // progress logging callback
 	datFile    *os.File
 	datSize    int64
 	idxEntries map[uint64]IdxEntry
+}
+
+func (s *Scanner) log(format string, args ...interface{}) {
+	if s.Log != nil {
+		s.Log(format, args...)
+	}
 }
 
 func NewScanner(datPath string) *Scanner {
@@ -40,6 +52,7 @@ func (s *Scanner) Run() (*ScanResult, error) {
 
 	result := &ScanResult{
 		DatFileSize: s.datSize,
+		datPath:     s.DatPath,
 	}
 
 	// Read superblock
@@ -59,33 +72,54 @@ func (s *Scanner) Run() (*ScanResult, error) {
 		}
 	}
 	result.Version = s.Version
+	s.log("volume: %s (%s, version %d)", s.DatPath, humanSize(s.datSize), s.Version)
 
 	// Load idx if available
 	if s.IdxPath != "" {
 		s.idxEntries, err = ReadIdxFile(s.IdxPath)
 		if err != nil {
-			// Non-fatal: continue without idx
+			s.log("warning: cannot read idx file: %v (continuing without)", err)
 			s.idxEntries = nil
 		} else {
 			result.Stats.IdxEntries = len(s.idxEntries)
+			s.log("loaded %d idx entries from %s", len(s.idxEntries), s.IdxPath)
 		}
 	}
 
+	startTime := time.Now()
+
 	// Phase 1: idx-guided scan
 	if s.idxEntries != nil {
+		s.log("[phase 1/3] idx-guided validation of %d entries...", len(s.idxEntries))
 		s.phase1IdxGuided(result)
+		s.log("[phase 1/3] done: %d matches, %d mismatches", result.Stats.IdxMatches, result.Stats.IdxMismatches)
 	}
 
 	// Phase 2: sequential scan with recovery
+	s.log("[phase 2/3] sequential scan of %s...", humanSize(s.datSize))
 	s.phase2Sequential(result)
+	s.log("[phase 2/3] done: found %d needles, %d corruption gaps", len(result.Records), len(result.CorruptionGaps))
 
 	// Phase 3: deep scan (optional)
 	if s.DeepScan && len(result.CorruptionGaps) > 0 {
+		totalGapSize := int64(0)
+		for _, gap := range result.CorruptionGaps {
+			totalGapSize += gap.Size()
+		}
+		s.log("[phase 3/3] deep scan of %d gaps (%s)...", len(result.CorruptionGaps), humanSize(totalGapSize))
+		beforeRecords := len(result.Records)
 		s.phase3Deep(result)
+		s.log("[phase 3/3] done: recovered %d additional needles", len(result.Records)-beforeRecords)
+	} else if s.DeepScan {
+		s.log("[phase 3/3] skipped: no corruption gaps to deep scan")
 	}
 
 	// Compute final stats
 	s.computeStats(result)
+
+	elapsed := time.Since(startTime)
+	throughput := float64(s.datSize) / (1024 * 1024) / elapsed.Seconds()
+	s.log("scan completed in %v (%.1f MB/s)", elapsed.Round(time.Millisecond), throughput)
 
 	return result, nil
 }
@@ -114,8 +148,15 @@ func (s *Scanner) phase1IdxGuided(result *ScanResult) {
 func (s *Scanner) phase2Sequential(result *ScanResult) {
 	offset := int64(SuperBlockSize)
 	seenOffsets := make(map[int64]bool)
+	lastProgressPct := -1
 
 	for offset < s.datSize {
+		// Log progress every 10%
+		pct := int(float64(offset) / float64(s.datSize) * 100)
+		if pct/10 > lastProgressPct/10 && pct > 0 {
+			lastProgressPct = pct
+			s.log("  scanning... %d%% (offset %d / %d)", pct, offset, s.datSize)
+		}
 		rec := s.validateAtOffset(offset)
 		if rec != nil && (rec.Status == StatusValid || rec.Status == StatusDeleted || rec.Status == StatusCorruptedData) {
 			rec.Source = "sequential"

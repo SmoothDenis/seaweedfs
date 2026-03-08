@@ -79,6 +79,7 @@ type ScanResult struct {
 	Records        []NeedleRecord
 	CorruptionGaps []Gap
 	Stats          ScanStats
+	datPath        string // source file path (for report recommendations)
 }
 
 type IdxEntry struct {

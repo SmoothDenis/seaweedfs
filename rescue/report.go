@@ -49,6 +49,34 @@ func PrintReport(w io.Writer, result *ScanResult, verbose bool) {
 			fmt.Fprintln(w)
 		}
 	}
+
+	// Summary
+	fmt.Fprintf(w, "\n--- Summary ---\n")
+	recoverable := result.Stats.ValidNeedles + result.Stats.Recovered
+	lost := result.Stats.CorruptedData + result.Stats.CorruptedHeader
+	totalUseful := recoverable + result.Stats.DeletedNeedles
+
+	if lost == 0 && len(result.CorruptionGaps) == 0 {
+		fmt.Fprintf(w, "Volume is healthy: %d needles (%d active, %d deleted), no corruption.\n",
+			result.Stats.TotalNeedles, result.Stats.ValidNeedles, result.Stats.DeletedNeedles)
+	} else {
+		fmt.Fprintf(w, "Recoverable:     %d needles (%d valid + %d deep-scan recovered)\n", recoverable, result.Stats.ValidNeedles, result.Stats.Recovered)
+		if result.Stats.Recovered > 0 {
+			fmt.Fprintf(w, "Recovered bytes: %s\n", humanSize(result.Stats.BytesRecovered))
+		}
+		fmt.Fprintf(w, "Lost:            %d needles (%d corrupted data, %d corrupted header)\n", lost, result.Stats.CorruptedData, result.Stats.CorruptedHeader)
+		if result.Stats.TotalNeedles > 0 {
+			pct := float64(recoverable) / float64(recoverable+lost) * 100
+			fmt.Fprintf(w, "Recovery rate:   %.1f%%\n", pct)
+		}
+		fmt.Fprintf(w, "\nRecommended actions:\n")
+		if len(result.CorruptionGaps) > 0 {
+			fmt.Fprintf(w, "  weed-rescue --extract recovered.dat %s\n", result.datPath)
+			fmt.Fprintf(w, "  # Extract %d valid needles to a clean .dat + .idx (removes corruption gaps)\n", recoverable)
+		}
+		fmt.Fprintf(w, "  weed-rescue --rebuildIdx %s\n", result.datPath)
+		fmt.Fprintf(w, "  # Rebuild .idx from %d entries found in the .dat\n", totalUseful)
+	}
 }
 
 func PrintJSON(w io.Writer, result *ScanResult) error {

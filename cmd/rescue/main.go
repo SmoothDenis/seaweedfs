@@ -16,6 +16,7 @@ func main() {
 	deep := flag.Bool("deep", false, "enable deep scan for maximum recovery (slower)")
 	verbose := flag.Bool("verbose", false, "show detailed per-needle output")
 	jsonOutput := flag.Bool("json", false, "output results as JSON")
+	quiet := flag.Bool("quiet", false, "suppress progress logging (only output report)")
 
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: weed-rescue [flags] <path-to-dat-file>\n\n")
@@ -39,6 +40,11 @@ func main() {
 	scanner.Version = *version
 	scanner.DeepScan = *deep
 	scanner.Verbose = *verbose
+	if !*quiet {
+		scanner.Log = func(format string, args ...interface{}) {
+			fmt.Fprintf(os.Stderr, format+"\n", args...)
+		}
+	}
 
 	result, err := scanner.Run()
 	if err != nil {
