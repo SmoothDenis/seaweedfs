@@ -25,13 +25,26 @@ func PrintReport(w io.Writer, result *ScanResult, verbose bool) {
 		fmt.Fprintf(w, "  Mismatches:    %d\n", result.Stats.IdxMismatches)
 	}
 
+	// List corrupted needles by ID (always, not just verbose)
+	if result.Stats.CorruptedData > 0 {
+		fmt.Fprintf(w, "\n--- Corrupted Needles (data damaged, header intact) ---\n")
+		for _, rec := range result.Records {
+			if rec.Status == StatusCorruptedData {
+				fmt.Fprintf(w, "  needle id=%-10d offset=%-10d dataSize=%-8d crc_stored=%08x crc_computed=%08x\n",
+					rec.NeedleId, rec.Offset, rec.DataSize, rec.StoredCRC, rec.ComputedCRC)
+			}
+		}
+	}
+
 	if len(result.CorruptionGaps) > 0 {
-		fmt.Fprintf(w, "\n--- Corruption Gaps ---\n")
+		fmt.Fprintf(w, "\n--- Corruption Gaps (header destroyed, data unreadable) ---\n")
 		for i, gap := range result.CorruptionGaps {
 			fmt.Fprintf(w, "  Gap %d: offset %d - %d (%s)\n", i+1, gap.StartOffset, gap.EndOffset, humanSize(gap.Size()))
 		}
 		fmt.Fprintf(w, "Total corrupted: %s\n", humanSize(result.Stats.BytesCorrupted))
-	} else {
+	}
+
+	if result.Stats.CorruptedData == 0 && len(result.CorruptionGaps) == 0 {
 		fmt.Fprintf(w, "\nNo corruption detected.\n")
 	}
 
@@ -70,9 +83,13 @@ func PrintReport(w io.Writer, result *ScanResult, verbose bool) {
 			fmt.Fprintf(w, "Recovery rate:   %.1f%%\n", pct)
 		}
 		fmt.Fprintf(w, "\nRecommended actions:\n")
-		if len(result.CorruptionGaps) > 0 {
+		if len(result.CorruptionGaps) > 0 || result.Stats.CorruptedData > 0 {
 			fmt.Fprintf(w, "  weed-rescue --extract recovered.dat %s\n", result.datPath)
-			fmt.Fprintf(w, "  # Extract %d valid needles to a clean .dat + .idx (removes corruption gaps)\n", recoverable)
+			fmt.Fprintf(w, "  # Extract %d valid needles to a clean .dat + .idx\n", recoverable)
+		}
+		if result.Stats.CorruptedData > 0 {
+			fmt.Fprintf(w, "  weed-rescue --extract recovered.dat --include-corrupted %s\n", result.datPath)
+			fmt.Fprintf(w, "  # Same but also include %d corrupted needles (data may be partially damaged)\n", result.Stats.CorruptedData)
 		}
 		fmt.Fprintf(w, "  weed-rescue --rebuildIdx %s\n", result.datPath)
 		fmt.Fprintf(w, "  # Rebuild .idx from %d entries found in the .dat\n", totalUseful)

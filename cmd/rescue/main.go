@@ -17,6 +17,7 @@ func main() {
 	verbose := flag.Bool("verbose", false, "show detailed per-needle output")
 	jsonOutput := flag.Bool("json", false, "output results as JSON")
 	quiet := flag.Bool("quiet", false, "suppress progress logging (only output report)")
+	includeCorrupted := flag.Bool("include-corrupted", false, "include corrupted-data needles in extract (data may be partially damaged)")
 
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: weed-rescue [flags] <path-to-dat-file>\n\n")
@@ -74,7 +75,7 @@ func main() {
 
 	// Extract valid data if requested
 	if *extractPath != "" {
-		count, err := rescue.ExtractValidNeedles(datPath, result, *extractPath)
+		count, err := rescue.ExtractValidNeedles(datPath, result, *extractPath, *includeCorrupted)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error extracting: %v\n", err)
 			os.Exit(1)

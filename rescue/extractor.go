@@ -38,8 +38,12 @@ func RebuildIdx(datPath string, result *ScanResult) (int, error) {
 }
 
 // ExtractValidNeedles copies valid needles from a source .dat to a new clean .dat + .idx pair.
-// Only needles with StatusValid or StatusRecovered are included.
-func ExtractValidNeedles(srcDatPath string, result *ScanResult, dstDatPath string) (int, error) {
+// By default only StatusValid/StatusRecovered/StatusDeleted are included.
+// If includeCorrupted is true, StatusCorruptedData needles are also included
+// (their header is intact so they can be read, but data may be partially damaged).
+func ExtractValidNeedles(srcDatPath string, result *ScanResult, dstDatPath string, includeCorrupted ...bool) (int, error) {
+	withCorrupted := len(includeCorrupted) > 0 && includeCorrupted[0]
+
 	src, err := os.Open(srcDatPath)
 	if err != nil {
 		return 0, fmt.Errorf("open source dat: %w", err)
@@ -60,8 +64,13 @@ func ExtractValidNeedles(srcDatPath string, result *ScanResult, dstDatPath strin
 	// Sort records by offset for sequential reading
 	validRecords := make([]NeedleRecord, 0, len(result.Records))
 	for _, rec := range result.Records {
-		if rec.Status == StatusValid || rec.Status == StatusRecovered || rec.Status == StatusDeleted {
+		switch rec.Status {
+		case StatusValid, StatusRecovered, StatusDeleted:
 			validRecords = append(validRecords, rec)
+		case StatusCorruptedData:
+			if withCorrupted {
+				validRecords = append(validRecords, rec)
+			}
 		}
 	}
 	sort.Slice(validRecords, func(i, j int) bool {
