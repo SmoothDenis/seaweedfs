@@ -110,12 +110,33 @@ func (s *Scanner) Run() (*ScanResult, error) {
 		for _, gap := range result.CorruptionGaps {
 			totalGapSize += gap.Size()
 		}
-		s.log("[phase 3/3] deep scan of %d gaps (%s)...", len(result.CorruptionGaps), humanSize(totalGapSize))
+		s.log("[phase 3/4] deep scan of %d gaps (%s)...", len(result.CorruptionGaps), humanSize(totalGapSize))
 		beforeRecords := len(result.Records)
 		s.phase3Deep(result)
-		s.log("[phase 3/3] done: recovered %d additional needles", len(result.Records)-beforeRecords)
+		s.log("[phase 3/4] done: recovered %d additional needles", len(result.Records)-beforeRecords)
 	} else if s.DeepScan {
-		s.log("[phase 3/3] skipped: no corruption gaps to deep scan")
+		s.log("[phase 3/4] skipped: no corruption gaps to deep scan")
+	}
+
+	// Phase 4: tail-pattern recovery (optional, only V3)
+	if s.DeepScan && len(result.CorruptionGaps) > 0 && s.Version == 3 {
+		s.log("[phase 4/4] tail-pattern recovery in %d gaps...", len(result.CorruptionGaps))
+		seenOffsets := make(map[int64]bool)
+		for _, rec := range result.Records {
+			seenOffsets[rec.Offset] = true
+		}
+		tailRecovered := RecoverFromTails(s.datFile, result.CorruptionGaps, s.Version, s.Log)
+		added := 0
+		for _, rec := range tailRecovered {
+			if !seenOffsets[rec.Offset] {
+				result.Records = append(result.Records, rec)
+				seenOffsets[rec.Offset] = true
+				added++
+			}
+		}
+		s.log("[phase 4/4] done: recovered %d additional needles via tail patterns", added)
+	} else if s.DeepScan && s.Version != 3 {
+		s.log("[phase 4/4] skipped: tail-pattern recovery requires V3 (timestamps)")
 	}
 
 	// Compute final stats

@@ -95,14 +95,20 @@ func PrintReport(w io.Writer, result *ScanResult, verbose bool, signatures ...[]
 		}
 		fmt.Fprintf(w, "\nRecommended actions:\n")
 		if len(result.CorruptionGaps) > 0 || result.Stats.CorruptedData > 0 {
-			fmt.Fprintf(w, "  weed-rescue --extract recovered.dat %s\n", result.datPath)
-			fmt.Fprintf(w, "  # Extract %d valid needles to a clean .dat + .idx\n", recoverable)
+			fmt.Fprintf(w, "  1. weed-rescue --deep --repair --extract repaired.dat --verify %s\n", result.datPath)
+			fmt.Fprintf(w, "     # Deep scan + tail recovery + CRC repair + extract + verify output\n")
 		}
 		if result.Stats.CorruptedData > 0 {
-			fmt.Fprintf(w, "  weed-rescue --repair --extract repaired.dat %s\n", result.datPath)
-			fmt.Fprintf(w, "  # Try to fix %d corrupted needles (single-byte repair) and extract all recoverable data\n", result.Stats.CorruptedData)
-			fmt.Fprintf(w, "  weed-rescue --extract recovered.dat --include-corrupted %s\n", result.datPath)
-			fmt.Fprintf(w, "  # Extract including corrupted needles as-is (no repair, data may be partially damaged)\n")
+			fmt.Fprintf(w, "  2. weed-rescue --repair --dry-run %s\n", result.datPath)
+			fmt.Fprintf(w, "     # Preview: show which corrupted needles can be fixed without writing files\n")
+		}
+		if len(result.CorruptionGaps) > 0 || result.Stats.CorruptedData > 0 {
+			fmt.Fprintf(w, "  3. weed-rescue --extract recovered.dat --verify %s\n", result.datPath)
+			fmt.Fprintf(w, "     # Extract %d valid needles only (skip corrupted) + verify\n", recoverable)
+		}
+		if result.Stats.CorruptedData > 0 {
+			fmt.Fprintf(w, "  4. weed-rescue --extract all.dat --include-corrupted %s\n", result.datPath)
+			fmt.Fprintf(w, "     # Extract including %d corrupted needles as-is (no repair)\n", result.Stats.CorruptedData)
 		}
 		fmt.Fprintf(w, "  weed-rescue --rebuildIdx %s\n", result.datPath)
 		fmt.Fprintf(w, "  # Rebuild .idx from %d entries found in the .dat\n", totalUseful)

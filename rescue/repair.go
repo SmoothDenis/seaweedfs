@@ -87,6 +87,48 @@ func AttemptRepair(datFile *os.File, rec NeedleRecord, version int) RepairResult
 	return result
 }
 
+// DryRunResult holds the results of a repair dry-run.
+type DryRunResult struct {
+	Total      int
+	Repairable int
+	Results    []RepairResult
+}
+
+// DryRunRepair checks which corrupted needles can be fixed without writing any files.
+func DryRunRepair(datPath string, result *ScanResult, log Logger) (*DryRunResult, error) {
+	src, err := os.Open(datPath)
+	if err != nil {
+		return nil, fmt.Errorf("open dat: %w", err)
+	}
+	defer src.Close()
+
+	dr := &DryRunResult{}
+	for _, rec := range result.Records {
+		if rec.Status != StatusCorruptedData {
+			continue
+		}
+		dr.Total++
+		if log != nil {
+			log("  dry-run: checking needle id=%d (dataSize=%d)...", rec.NeedleId, rec.DataSize)
+		}
+		rr := AttemptRepair(src, rec, result.Version)
+		dr.Results = append(dr.Results, rr)
+		if rr.Repaired {
+			dr.Repairable++
+			if log != nil {
+				log("  dry-run: needle id=%d FIXABLE — byte %d: 0x%02X → 0x%02X",
+					rec.NeedleId, rr.ByteOffset, rr.OrigByte, rr.FixedByte)
+			}
+		} else if rr.MultiErrors {
+			if log != nil {
+				log("  dry-run: needle id=%d NOT FIXABLE (multi-byte corruption)", rec.NeedleId)
+			}
+		}
+	}
+
+	return dr, nil
+}
+
 // RepairAndExtract attempts CRC repair on corrupted needles, then extracts
 // all recoverable data (valid + recovered + repaired) to a new .dat + .idx pair.
 func RepairAndExtract(srcDatPath string, result *ScanResult, dstDatPath string, log Logger) (extracted int, repaired int, err error) {

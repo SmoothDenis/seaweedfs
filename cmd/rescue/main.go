@@ -19,6 +19,8 @@ func main() {
 	quiet := flag.Bool("quiet", false, "suppress progress logging (only output report)")
 	includeCorrupted := flag.Bool("include-corrupted", false, "include corrupted-data needles in extract (data may be partially damaged)")
 	repair := flag.Bool("repair", false, "attempt single-byte CRC repair on corrupted needles and extract repaired data")
+	verify := flag.Bool("verify", false, "re-scan output after extract/repair and show before/after comparison")
+	dryRun := flag.Bool("dry-run", false, "with --repair: show what would be fixed without writing files")
 
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: weed-rescue [flags] <path-to-dat-file>\n\n")
@@ -95,8 +97,31 @@ func main() {
 		fmt.Fprintf(os.Stderr, "\nExtracted %d valid needles to %s (idx: %s)\n", count, *extractPath, idxOutPath)
 	}
 
-	// Repair + extract
-	if *repair && *extractPath != "" {
+	// Repair: dry-run or actual
+	if *repair && *dryRun {
+		// Dry-run: just show what would be repaired, don't write anything
+		var logger rescue.Logger
+		if !*quiet {
+			logger = func(format string, args ...interface{}) {
+				fmt.Fprintf(os.Stderr, format+"\n", args...)
+			}
+		}
+		repairs, err := rescue.DryRunRepair(datPath, result, logger)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error during dry-run: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Fprintf(os.Stderr, "\nDry-run complete: %d of %d corrupted needles are repairable\n",
+			repairs.Repairable, repairs.Total)
+		for _, rr := range repairs.Results {
+			if rr.Repaired {
+				fmt.Fprintf(os.Stderr, "  needle id=%-10d byte %d: 0x%02X -> 0x%02X (fixable)\n",
+					rr.NeedleId, rr.ByteOffset, rr.OrigByte, rr.FixedByte)
+			} else if rr.MultiErrors {
+				fmt.Fprintf(os.Stderr, "  needle id=%-10d multi-byte corruption (not fixable)\n", rr.NeedleId)
+			}
+		}
+	} else if *repair && *extractPath != "" {
 		var logger rescue.Logger
 		if !*quiet {
 			logger = func(format string, args ...interface{}) {
@@ -110,9 +135,28 @@ func main() {
 		}
 		idxOutPath := (*extractPath)[:len(*extractPath)-4] + ".idx"
 		fmt.Fprintf(os.Stderr, "\nRepaired %d needles, extracted %d total to %s (idx: %s)\n", repaired, extracted, *extractPath, idxOutPath)
-	} else if *repair && *extractPath == "" {
-		fmt.Fprintf(os.Stderr, "Error: --repair requires --extract <path.dat>\n")
+	} else if *repair && *extractPath == "" && !*dryRun {
+		fmt.Fprintf(os.Stderr, "Error: --repair requires --extract <path.dat> or --dry-run\n")
 		os.Exit(1)
+	}
+
+	// Verify output if requested
+	if *verify && *extractPath != "" {
+		var logger rescue.Logger
+		if !*quiet {
+			logger = func(format string, args ...interface{}) {
+				fmt.Fprintf(os.Stderr, format+"\n", args...)
+			}
+		}
+		vr, err := rescue.VerifyOutput(*extractPath, result, logger)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error during verification: %v\n", err)
+			os.Exit(1)
+		}
+		rescue.PrintVerifyReport(os.Stdout, vr)
+		if vr.Regression {
+			os.Exit(3)
+		}
 	}
 
 	// Exit with non-zero if corruption was found
