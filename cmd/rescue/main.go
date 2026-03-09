@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/seaweedfs/seaweedfs/rescue"
 )
@@ -38,6 +39,53 @@ func main() {
 	}
 
 	datPath := flag.Arg(0)
+
+	// --- Flag validation ---
+	var errors []string
+
+	// Path validation
+	if len(datPath) < 5 || datPath[len(datPath)-4:] != ".dat" {
+		errors = append(errors, fmt.Sprintf("input path must end with .dat: %q", datPath))
+	}
+	if _, err := os.Stat(datPath); os.IsNotExist(err) {
+		errors = append(errors, fmt.Sprintf("input file does not exist: %s", datPath))
+	}
+	if *extractPath != "" {
+		if len(*extractPath) < 5 || (*extractPath)[len(*extractPath)-4:] != ".dat" {
+			errors = append(errors, fmt.Sprintf("--extract path must end with .dat: %q", *extractPath))
+		}
+		absExtract, _ := filepath.Abs(*extractPath)
+		absDat, _ := filepath.Abs(datPath)
+		if absExtract == absDat {
+			errors = append(errors, "cannot --extract to the same file as input (would overwrite source)")
+		}
+	}
+
+	// Version validation
+	if *version != 0 && (*version < 2 || *version > 3) {
+		errors = append(errors, fmt.Sprintf("--version must be 2 or 3, got %d", *version))
+	}
+
+	// Flag combination validation
+	if *verify && *extractPath == "" {
+		errors = append(errors, "--verify requires --extract <path.dat>")
+	}
+	if *dryRun && !*repair {
+		errors = append(errors, "--dry-run requires --repair")
+	}
+	if *includeCorrupted && *repair {
+		errors = append(errors, "--include-corrupted and --repair are mutually exclusive (use one or the other)")
+	}
+	if *repair && *extractPath == "" && !*dryRun {
+		errors = append(errors, "--repair requires --extract <path.dat> or --dry-run")
+	}
+
+	if len(errors) > 0 {
+		for _, e := range errors {
+			fmt.Fprintf(os.Stderr, "Error: %s\n", e)
+		}
+		os.Exit(1)
+	}
 
 	scanner := rescue.NewScanner(datPath)
 	scanner.IdxPath = *idxPath
@@ -135,9 +183,6 @@ func main() {
 		}
 		idxOutPath := (*extractPath)[:len(*extractPath)-4] + ".idx"
 		fmt.Fprintf(os.Stderr, "\nRepaired %d needles, extracted %d total to %s (idx: %s)\n", repaired, extracted, *extractPath, idxOutPath)
-	} else if *repair && *extractPath == "" && !*dryRun {
-		fmt.Fprintf(os.Stderr, "Error: --repair requires --extract <path.dat> or --dry-run\n")
-		os.Exit(1)
 	}
 
 	// Verify output if requested
@@ -148,13 +193,19 @@ func main() {
 				fmt.Fprintf(os.Stderr, format+"\n", args...)
 			}
 		}
-		vr, err := rescue.VerifyOutput(*extractPath, result, logger)
+		vr, idxIssues, err := rescue.VerifyExtractedVolume(*extractPath, result, logger)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error during verification: %v\n", err)
 			os.Exit(1)
 		}
 		rescue.PrintVerifyReport(os.Stdout, vr)
-		if vr.Regression {
+		if len(idxIssues) > 0 {
+			fmt.Fprintf(os.Stdout, "\n--- IDX Consistency Issues ---\n")
+			for _, issue := range idxIssues {
+				fmt.Fprintf(os.Stdout, "  %s\n", issue)
+			}
+		}
+		if vr.Regression || len(vr.NeedlesCorrupt) > 0 {
 			os.Exit(3)
 		}
 	}

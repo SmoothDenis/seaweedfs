@@ -13,7 +13,8 @@ import (
 func RebuildIdx(datPath string, result *ScanResult) (int, error) {
 	validRecords := make([]NeedleRecord, 0, len(result.Records))
 	for _, rec := range result.Records {
-		if rec.Status == StatusValid || rec.Status == StatusRecovered || rec.Status == StatusDeleted {
+		switch rec.Status {
+		case StatusValid, StatusRecovered, StatusDeleted, StatusRepaired:
 			validRecords = append(validRecords, rec)
 		}
 	}

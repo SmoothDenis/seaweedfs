@@ -60,6 +60,90 @@ func TestVerifyCleanExtract(t *testing.T) {
 	if vr.OutputStats.ValidNeedles != 2 {
 		t.Errorf("expected 2 valid in output, got %d", vr.OutputStats.ValidNeedles)
 	}
+
+	// Verify needle-level content
+	if !vr.ContentVerified {
+		t.Error("expected content verification to be performed")
+	}
+	if len(vr.NeedlesMissing) > 0 {
+		t.Errorf("expected no missing needles, got %v", vr.NeedlesMissing)
+	}
+	if len(vr.NeedlesCorrupt) > 0 {
+		t.Errorf("expected no corrupt needles, got %v", vr.NeedlesCorrupt)
+	}
+	if vr.NeedlesIntact != 2 {
+		t.Errorf("expected 2 intact needles (CRC match), got %d", vr.NeedlesIntact)
+	}
+}
+
+func TestVerifyIdxConsistency(t *testing.T) {
+	dir := t.TempDir()
+	datPath := filepath.Join(dir, "test.dat")
+	f, _ := os.Create(datPath)
+	sb := make([]byte, SuperBlockSize)
+	sb[0] = 3
+	f.Write(sb)
+	f.Write(buildNeedleV3(0xAA, 1, []byte("one")))
+	f.Write(buildNeedleV3(0xBB, 2, []byte("two")))
+	f.Write(buildNeedleV3(0xCC, 3, []byte("three")))
+	f.Close()
+
+	scanner := NewScanner(datPath)
+	result, err := scanner.Run()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Extract to get .dat + .idx pair
+	outPath := filepath.Join(dir, "out.dat")
+	_, err = ExtractValidNeedles(datPath, result, outPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify idx consistency
+	outScanner := NewScanner(outPath)
+	outResult, _ := outScanner.Run()
+	idxPath := filepath.Join(dir, "out.idx")
+	issues, err := VerifyIdxConsistency(idxPath, outResult)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(issues) != 0 {
+		t.Errorf("expected no idx issues, got: %v", issues)
+	}
+}
+
+func TestVerifyExtractedVolume(t *testing.T) {
+	dir := t.TempDir()
+	datPath := filepath.Join(dir, "test.dat")
+	f, _ := os.Create(datPath)
+	sb := make([]byte, SuperBlockSize)
+	sb[0] = 3
+	f.Write(sb)
+	f.Write(buildNeedleV3(0xAA, 1, []byte("file one")))
+	f.Write(buildNeedleV3(0xBB, 2, []byte("file two corrupted")))
+	n1Size := len(buildNeedleV3(0xAA, 1, []byte("file one")))
+	corruptPos := int64(SuperBlockSize + n1Size + NeedleHeaderSize + 4 + 2)
+	f.WriteAt([]byte{0xFF}, corruptPos)
+	f.Close()
+
+	scanner := NewScanner(datPath)
+	result, _ := scanner.Run()
+
+	outPath := filepath.Join(dir, "repaired.dat")
+	RepairAndExtract(datPath, result, outPath, nil)
+
+	vr, idxIssues, err := VerifyExtractedVolume(outPath, result, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !vr.Clean {
+		t.Error("expected clean output")
+	}
+	if len(idxIssues) != 0 {
+		t.Errorf("expected no idx issues, got: %v", idxIssues)
+	}
 }
 
 func TestVerifyDetectsRegression(t *testing.T) {
