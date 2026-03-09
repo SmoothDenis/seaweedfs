@@ -172,14 +172,15 @@ func RepairAndExtract(srcDatPath string, result *ScanResult, dstDatPath string, 
 		repairMap[rr.Offset] = rr
 	}
 
-	// Extract: valid + recovered + deleted + repaired
-	dst, err := os.Create(dstDatPath)
+	// Extract: valid + recovered + deleted + repaired (atomic write)
+	sw, err := NewSafeWriter(dstDatPath)
 	if err != nil {
-		return 0, 0, fmt.Errorf("create dest dat: %w", err)
+		return 0, 0, fmt.Errorf("create safe writer for dat: %w", err)
 	}
-	defer dst.Close()
+	dst := sw.File()
 
 	if _, err := dst.Write(result.SuperBlockData); err != nil {
+		sw.Abort()
 		return 0, 0, fmt.Errorf("write superblock: %w", err)
 	}
 
@@ -204,6 +205,7 @@ func RepairAndExtract(srcDatPath string, result *ScanResult, dstDatPath string, 
 		buf := make([]byte, diskSize)
 		n, err := src.ReadAt(buf, rec.Offset)
 		if err != nil && err != io.EOF {
+			sw.Abort()
 			return written, repairedCount, fmt.Errorf("read needle at offset %d: %w", rec.Offset, err)
 		}
 		if int64(n) < diskSize {
@@ -222,10 +224,12 @@ func RepairAndExtract(srcDatPath string, result *ScanResult, dstDatPath string, 
 
 		newOffset, err := dst.Seek(0, io.SeekCurrent)
 		if err != nil {
+			sw.Abort()
 			return written, repairedCount, fmt.Errorf("seek dest: %w", err)
 		}
 
 		if _, err := dst.Write(buf[:diskSize]); err != nil {
+			sw.Abort()
 			return written, repairedCount, fmt.Errorf("write needle: %w", err)
 		}
 
@@ -237,9 +241,16 @@ func RepairAndExtract(srcDatPath string, result *ScanResult, dstDatPath string, 
 		written++
 	}
 
+	// Commit .dat atomically
+	if err := sw.Commit(); err != nil {
+		return written, repairedCount, fmt.Errorf("commit dat: %w", err)
+	}
+
+	// Write .idx atomically
 	idxPath := dstDatPath[:len(dstDatPath)-4] + ".idx"
-	if err := writeIdxEntries(idxPath, idxEntries); err != nil {
-		return written, repairedCount, fmt.Errorf("write idx: %w", err)
+	if err := writeIdxEntriesSafe(idxPath, idxEntries); err != nil {
+		os.Remove(dstDatPath)
+		return written, repairedCount, fmt.Errorf("write idx (dat rolled back): %w", err)
 	}
 
 	return written, repairedCount, nil

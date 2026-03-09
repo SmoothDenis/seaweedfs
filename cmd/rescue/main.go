@@ -23,10 +23,20 @@ func main() {
 	verify := flag.Bool("verify", false, "re-scan output after extract/repair and show before/after comparison")
 	dryRun := flag.Bool("dry-run", false, "with --repair: show what would be fixed without writing files")
 
+	force := flag.Bool("force", false, "skip confirmation prompts and overwrite existing output files")
+
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: weed-rescue [flags] <path-to-dat-file>\n\n")
 		fmt.Fprintf(os.Stderr, "Scans a SeaweedFS volume .dat file for valid and corrupted needles.\n")
 		fmt.Fprintf(os.Stderr, "Can recover data from corrupted volumes using CRC32 validation.\n\n")
+		fmt.Fprintf(os.Stderr, "SAFETY: The source .dat file is NEVER modified. All write operations\n")
+		fmt.Fprintf(os.Stderr, "produce new files. Writes use atomic temp+fsync+rename to prevent\n")
+		fmt.Fprintf(os.Stderr, "partial files on crash. A file lock prevents concurrent runs.\n\n")
+		fmt.Fprintf(os.Stderr, "Exit codes:\n")
+		fmt.Fprintf(os.Stderr, "  0  Volume is healthy, no corruption found\n")
+		fmt.Fprintf(os.Stderr, "  1  Usage error, invalid flags, pre-flight failure\n")
+		fmt.Fprintf(os.Stderr, "  2  Corruption detected in source volume\n")
+		fmt.Fprintf(os.Stderr, "  3  Verification failed: output has regressions (DO NOT USE)\n\n")
 		fmt.Fprintf(os.Stderr, "Flags:\n")
 		flag.PrintDefaults()
 	}
@@ -87,16 +97,37 @@ func main() {
 		os.Exit(1)
 	}
 
+	// --- Pre-flight checks ---
+	preflightIssues := rescue.PreFlightChecks(datPath, *extractPath, *force)
+	if len(preflightIssues) > 0 {
+		fmt.Fprintf(os.Stderr, "Pre-flight check failed:\n")
+		for _, issue := range preflightIssues {
+			fmt.Fprintf(os.Stderr, "  ERROR: %s\n", issue)
+		}
+		os.Exit(1)
+	}
+
+	// --- Acquire exclusive lock on source volume ---
+	lockFile, err := rescue.LockFile(datPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	defer rescue.UnlockFile(lockFile)
+
+	var logger rescue.Logger
+	if !*quiet {
+		logger = func(format string, args ...interface{}) {
+			fmt.Fprintf(os.Stderr, format+"\n", args...)
+		}
+	}
+
 	scanner := rescue.NewScanner(datPath)
 	scanner.IdxPath = *idxPath
 	scanner.Version = *version
 	scanner.DeepScan = *deep
 	scanner.Verbose = *verbose
-	if !*quiet {
-		scanner.Log = func(format string, args ...interface{}) {
-			fmt.Fprintf(os.Stderr, format+"\n", args...)
-		}
-	}
+	scanner.Log = logger
 
 	result, err := scanner.Run()
 	if err != nil {
@@ -147,13 +178,6 @@ func main() {
 
 	// Repair: dry-run or actual
 	if *repair && *dryRun {
-		// Dry-run: just show what would be repaired, don't write anything
-		var logger rescue.Logger
-		if !*quiet {
-			logger = func(format string, args ...interface{}) {
-				fmt.Fprintf(os.Stderr, format+"\n", args...)
-			}
-		}
 		repairs, err := rescue.DryRunRepair(datPath, result, logger)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error during dry-run: %v\n", err)
@@ -170,12 +194,6 @@ func main() {
 			}
 		}
 	} else if *repair && *extractPath != "" {
-		var logger rescue.Logger
-		if !*quiet {
-			logger = func(format string, args ...interface{}) {
-				fmt.Fprintf(os.Stderr, format+"\n", args...)
-			}
-		}
 		extracted, repaired, err := rescue.RepairAndExtract(datPath, result, *extractPath, logger)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error during repair+extract: %v\n", err)
@@ -187,12 +205,6 @@ func main() {
 
 	// Verify output if requested
 	if *verify && *extractPath != "" {
-		var logger rescue.Logger
-		if !*quiet {
-			logger = func(format string, args ...interface{}) {
-				fmt.Fprintf(os.Stderr, format+"\n", args...)
-			}
-		}
 		vr, idxIssues, err := rescue.VerifyExtractedVolume(*extractPath, result, logger)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error during verification: %v\n", err)

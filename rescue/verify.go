@@ -232,6 +232,21 @@ func PrintVerifyReport(w io.Writer, vr *VerifyResult) {
 	}
 
 	fmt.Fprintf(w, "\nResult: %s\n", vr.Summary)
+
+	// Explicit verdict — no ambiguity
+	fmt.Fprintln(w)
+	if vr.Clean && !vr.Regression && len(vr.NeedlesCorrupt) == 0 && len(vr.NeedlesMissing) == 0 {
+		fmt.Fprintf(w, ">>> VERDICT: SAFE TO USE — output volume passed all checks <<<\n")
+		fmt.Fprintf(w, "    The output .dat and .idx can be used as a replacement for the original.\n")
+	} else if vr.Regression || len(vr.NeedlesCorrupt) > 0 || len(vr.NeedlesMissing) > 0 {
+		fmt.Fprintf(w, ">>> VERDICT: DO NOT USE — output volume has problems <<<\n")
+		fmt.Fprintf(w, "    The output has regressions or data loss compared to the original.\n")
+		fmt.Fprintf(w, "    DO NOT replace the original with this output. Investigate the issues above.\n")
+	} else {
+		fmt.Fprintf(w, ">>> VERDICT: USE WITH CAUTION — output has some unresolved corruption <<<\n")
+		fmt.Fprintf(w, "    No data was lost compared to the original, but some corruption remains.\n")
+		fmt.Fprintf(w, "    The output is at least as good as the original.\n")
+	}
 }
 
 // VerifyIdxConsistency checks that the .idx file is consistent with the .dat scan results.

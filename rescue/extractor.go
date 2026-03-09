@@ -10,6 +10,7 @@ import (
 
 // RebuildIdx rebuilds only the .idx file from scan results without touching the .dat file.
 // It uses the original offsets from the scan, so the .dat must remain unchanged.
+// Uses atomic write (temp + fsync + rename) to prevent corruption on crash.
 func RebuildIdx(datPath string, result *ScanResult) (int, error) {
 	validRecords := make([]NeedleRecord, 0, len(result.Records))
 	for _, rec := range result.Records {
@@ -32,7 +33,7 @@ func RebuildIdx(datPath string, result *ScanResult) (int, error) {
 	}
 
 	idxPath := datPath[:len(datPath)-4] + ".idx"
-	if err := writeIdxEntries(idxPath, idxEntries); err != nil {
+	if err := writeIdxEntriesSafe(idxPath, idxEntries); err != nil {
 		return 0, fmt.Errorf("write idx: %w", err)
 	}
 	return len(idxEntries), nil
@@ -42,6 +43,9 @@ func RebuildIdx(datPath string, result *ScanResult) (int, error) {
 // By default only StatusValid/StatusRecovered/StatusDeleted are included.
 // If includeCorrupted is true, StatusCorruptedData needles are also included
 // (their header is intact so they can be read, but data may be partially damaged).
+//
+// Uses atomic writes: both .dat and .idx are written to temp files first, then
+// fsync'd and renamed. If the process crashes mid-write, no partial files are left.
 func ExtractValidNeedles(srcDatPath string, result *ScanResult, dstDatPath string, includeCorrupted ...bool) (int, error) {
 	withCorrupted := len(includeCorrupted) > 0 && includeCorrupted[0]
 
@@ -51,14 +55,16 @@ func ExtractValidNeedles(srcDatPath string, result *ScanResult, dstDatPath strin
 	}
 	defer src.Close()
 
-	dst, err := os.Create(dstDatPath)
+	// Use SafeWriter for atomic output
+	sw, err := NewSafeWriter(dstDatPath)
 	if err != nil {
-		return 0, fmt.Errorf("create dest dat: %w", err)
+		return 0, fmt.Errorf("create safe writer for dat: %w", err)
 	}
-	defer dst.Close()
+	dst := sw.File()
 
 	// Write superblock
 	if _, err := dst.Write(result.SuperBlockData); err != nil {
+		sw.Abort()
 		return 0, fmt.Errorf("write superblock: %w", err)
 	}
 
@@ -89,6 +95,7 @@ func ExtractValidNeedles(srcDatPath string, result *ScanResult, dstDatPath strin
 		buf := make([]byte, diskSize)
 		n, err := src.ReadAt(buf, rec.Offset)
 		if err != nil && err != io.EOF {
+			sw.Abort()
 			return written, fmt.Errorf("read needle at offset %d: %w", rec.Offset, err)
 		}
 		if int64(n) < diskSize {
@@ -98,10 +105,12 @@ func ExtractValidNeedles(srcDatPath string, result *ScanResult, dstDatPath strin
 		// Record new offset before writing
 		newOffset, err := dst.Seek(0, io.SeekCurrent)
 		if err != nil {
+			sw.Abort()
 			return written, fmt.Errorf("seek dest: %w", err)
 		}
 
 		if _, err := dst.Write(buf[:diskSize]); err != nil {
+			sw.Abort()
 			return written, fmt.Errorf("write needle: %w", err)
 		}
 
@@ -113,10 +122,17 @@ func ExtractValidNeedles(srcDatPath string, result *ScanResult, dstDatPath strin
 		written++
 	}
 
-	// Write .idx file
-	idxPath := dstDatPath[:len(dstDatPath)-4] + ".idx" // replace .dat with .idx
-	if err := writeIdxEntries(idxPath, idxEntries); err != nil {
-		return written, fmt.Errorf("write idx: %w", err)
+	// Commit .dat atomically (fsync + rename)
+	if err := sw.Commit(); err != nil {
+		return written, fmt.Errorf("commit dat: %w", err)
+	}
+
+	// Write .idx atomically
+	idxPath := dstDatPath[:len(dstDatPath)-4] + ".idx"
+	if err := writeIdxEntriesSafe(idxPath, idxEntries); err != nil {
+		// .dat was committed but .idx failed — remove .dat to avoid inconsistency
+		os.Remove(dstDatPath)
+		return written, fmt.Errorf("write idx (dat rolled back): %w", err)
 	}
 
 	return written, nil
@@ -128,21 +144,24 @@ type idxWriteEntry struct {
 	size     int32
 }
 
-func writeIdxEntries(path string, entries []idxWriteEntry) error {
-	f, err := os.Create(path)
+// writeIdxEntriesSafe writes idx entries atomically via temp + fsync + rename.
+func writeIdxEntriesSafe(path string, entries []idxWriteEntry) error {
+	sw, err := NewSafeWriter(path)
 	if err != nil {
 		return err
 	}
-	defer f.Close()
 
+	f := sw.File()
 	buf := make([]byte, IdxEntrySize)
 	for _, e := range entries {
 		binary.BigEndian.PutUint64(buf[0:8], e.needleId)
 		binary.BigEndian.PutUint32(buf[8:12], uint32(e.offset/NeedlePaddingSize))
 		binary.BigEndian.PutUint32(buf[12:16], uint32(e.size))
 		if _, err := f.Write(buf); err != nil {
+			sw.Abort()
 			return err
 		}
 	}
-	return nil
+
+	return sw.Commit()
 }
