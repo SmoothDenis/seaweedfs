@@ -150,6 +150,90 @@ func TestPreFlightChecksBadSource(t *testing.T) {
 	}
 }
 
+func TestReplaceOriginalHappyPath(t *testing.T) {
+	dir := t.TempDir()
+
+	// Create "original" files
+	origDat := filepath.Join(dir, "volume.dat")
+	origIdx := filepath.Join(dir, "volume.idx")
+	os.WriteFile(origDat, []byte("original dat content"), 0644)
+	os.WriteFile(origIdx, []byte("original idx content"), 0644)
+
+	// Create "recovered" files
+	recDat := filepath.Join(dir, "recovered.dat")
+	recIdx := filepath.Join(dir, "recovered.idx")
+	os.WriteFile(recDat, []byte("recovered dat content"), 0644)
+	os.WriteFile(recIdx, []byte("recovered idx content"), 0644)
+
+	err := ReplaceOriginal(origDat, recDat, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Original paths should now have recovered content
+	data, _ := os.ReadFile(origDat)
+	if string(data) != "recovered dat content" {
+		t.Errorf("expected recovered dat, got %q", string(data))
+	}
+	data, _ = os.ReadFile(origIdx)
+	if string(data) != "recovered idx content" {
+		t.Errorf("expected recovered idx, got %q", string(data))
+	}
+
+	// Backups should have original content
+	data, _ = os.ReadFile(origDat + ".bak")
+	if string(data) != "original dat content" {
+		t.Errorf("expected original dat in backup, got %q", string(data))
+	}
+	data, _ = os.ReadFile(origIdx + ".bak")
+	if string(data) != "original idx content" {
+		t.Errorf("expected original idx in backup, got %q", string(data))
+	}
+
+	// Recovered files should no longer exist at original paths
+	if _, err := os.Stat(recDat); err == nil {
+		t.Error("recovered .dat should have been moved, not copied")
+	}
+	if _, err := os.Stat(recIdx); err == nil {
+		t.Error("recovered .idx should have been moved, not copied")
+	}
+}
+
+func TestReplaceOriginalBackupExists(t *testing.T) {
+	dir := t.TempDir()
+
+	origDat := filepath.Join(dir, "volume.dat")
+	os.WriteFile(origDat, []byte("original"), 0644)
+	os.WriteFile(origDat+".bak", []byte("old backup"), 0644)
+
+	recDat := filepath.Join(dir, "recovered.dat")
+	recIdx := filepath.Join(dir, "recovered.idx")
+	os.WriteFile(recDat, []byte("recovered"), 0644)
+	os.WriteFile(recIdx, []byte("recovered idx"), 0644)
+
+	err := ReplaceOriginal(origDat, recDat, nil)
+	if err == nil {
+		t.Fatal("expected error about existing backup")
+	}
+
+	// Original should be untouched
+	data, _ := os.ReadFile(origDat)
+	if string(data) != "original" {
+		t.Error("original should be untouched when backup exists")
+	}
+}
+
+func TestReplaceOriginalMissingRecovered(t *testing.T) {
+	dir := t.TempDir()
+	origDat := filepath.Join(dir, "volume.dat")
+	os.WriteFile(origDat, []byte("original"), 0644)
+
+	err := ReplaceOriginal(origDat, filepath.Join(dir, "nonexistent.dat"), nil)
+	if err == nil {
+		t.Fatal("expected error about missing recovered file")
+	}
+}
+
 func TestAtomicExtractDoesNotLeavePartialFiles(t *testing.T) {
 	dir := t.TempDir()
 	datPath := filepath.Join(dir, "test.dat")

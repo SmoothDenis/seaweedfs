@@ -111,6 +111,83 @@ func UnlockFile(lockFile *os.File) {
 	os.Remove(lockPath)
 }
 
+// ReplaceOriginal backs up the original .dat and .idx, then atomically replaces them
+// with the recovered versions. Backup files get a .bak extension.
+// If any step fails, all changes are rolled back.
+func ReplaceOriginal(originalDatPath, recoveredDatPath string, log Logger) error {
+	originalIdxPath := originalDatPath[:len(originalDatPath)-4] + ".idx"
+	recoveredIdxPath := recoveredDatPath[:len(recoveredDatPath)-4] + ".idx"
+
+	bakDatPath := originalDatPath + ".bak"
+	bakIdxPath := originalIdxPath + ".bak"
+
+	// Verify recovered files exist
+	if _, err := os.Stat(recoveredDatPath); err != nil {
+		return fmt.Errorf("recovered .dat not found: %s", recoveredDatPath)
+	}
+	if _, err := os.Stat(recoveredIdxPath); err != nil {
+		return fmt.Errorf("recovered .idx not found: %s", recoveredIdxPath)
+	}
+
+	// Check backup paths don't already exist (don't overwrite previous backups)
+	if _, err := os.Stat(bakDatPath); err == nil {
+		return fmt.Errorf("backup already exists: %s (remove it first or use a different path)", bakDatPath)
+	}
+	if _, err := os.Stat(bakIdxPath); err == nil {
+		return fmt.Errorf("backup already exists: %s (remove it first or use a different path)", bakIdxPath)
+	}
+
+	if log != nil {
+		log("replace: backing up %s -> %s", originalDatPath, bakDatPath)
+	}
+
+	// Step 1: Rename original .dat to .bak
+	if err := os.Rename(originalDatPath, bakDatPath); err != nil {
+		return fmt.Errorf("backup original .dat: %w", err)
+	}
+
+	// Step 2: Rename original .idx to .bak
+	if _, err := os.Stat(originalIdxPath); err == nil {
+		if log != nil {
+			log("replace: backing up %s -> %s", originalIdxPath, bakIdxPath)
+		}
+		if err := os.Rename(originalIdxPath, bakIdxPath); err != nil {
+			// Rollback: restore .dat
+			os.Rename(bakDatPath, originalDatPath)
+			return fmt.Errorf("backup original .idx (dat restored): %w", err)
+		}
+	}
+
+	if log != nil {
+		log("replace: moving recovered files into place")
+	}
+
+	// Step 3: Rename recovered .dat to original path
+	if err := os.Rename(recoveredDatPath, originalDatPath); err != nil {
+		// Rollback: restore both originals
+		os.Rename(bakDatPath, originalDatPath)
+		os.Rename(bakIdxPath, originalIdxPath)
+		return fmt.Errorf("move recovered .dat into place (originals restored): %w", err)
+	}
+
+	// Step 4: Rename recovered .idx to original path
+	if err := os.Rename(recoveredIdxPath, originalIdxPath); err != nil {
+		// Rollback: restore .dat from backup, move recovered .dat back
+		os.Rename(originalDatPath, recoveredDatPath)
+		os.Rename(bakDatPath, originalDatPath)
+		os.Rename(bakIdxPath, originalIdxPath)
+		return fmt.Errorf("move recovered .idx into place (originals restored): %w", err)
+	}
+
+	if log != nil {
+		log("replace: done — originals backed up as .bak")
+		log("replace:   %s", bakDatPath)
+		log("replace:   %s", bakIdxPath)
+	}
+
+	return nil
+}
+
 // PreFlightChecks validates that the environment is ready for a rescue operation.
 // Returns a list of issues. Empty list = all good.
 func PreFlightChecks(datPath string, extractPath string, force ...bool) []string {

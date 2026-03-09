@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bufio"
 	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/seaweedfs/seaweedfs/rescue"
 )
@@ -23,6 +25,7 @@ func main() {
 	verify := flag.Bool("verify", false, "re-scan output after extract/repair and show before/after comparison")
 	dryRun := flag.Bool("dry-run", false, "with --repair: show what would be fixed without writing files")
 
+	replace := flag.Bool("replace", false, "after successful --verify, replace original volume with recovered one (prompts for confirmation)")
 	force := flag.Bool("force", false, "skip confirmation prompts and overwrite existing output files")
 
 	flag.Usage = func() {
@@ -88,6 +91,12 @@ func main() {
 	}
 	if *repair && *extractPath == "" && !*dryRun {
 		errors = append(errors, "--repair requires --extract <path.dat> or --dry-run")
+	}
+	if *replace && !*verify {
+		errors = append(errors, "--replace requires --verify (must verify before replacing)")
+	}
+	if *replace && *extractPath == "" {
+		errors = append(errors, "--replace requires --extract <path.dat>")
 	}
 
 	if len(errors) > 0 {
@@ -219,6 +228,42 @@ func main() {
 		}
 		if vr.Regression || len(vr.NeedlesCorrupt) > 0 {
 			os.Exit(3)
+		}
+
+		// Replace original with recovered if requested and verification passed
+		if *replace && vr.Clean && !vr.Regression && len(vr.NeedlesCorrupt) == 0 && len(vr.NeedlesMissing) == 0 {
+			fmt.Fprintf(os.Stderr, "\n")
+			fmt.Fprintf(os.Stderr, "=== Replace Original Volume ===\n")
+			fmt.Fprintf(os.Stderr, "This will:\n")
+			fmt.Fprintf(os.Stderr, "  1. Back up original files with .bak extension\n")
+			fmt.Fprintf(os.Stderr, "  2. Replace %s with %s\n", datPath, *extractPath)
+			idxOrig := datPath[:len(datPath)-4] + ".idx"
+			idxRecov := (*extractPath)[:len(*extractPath)-4] + ".idx"
+			fmt.Fprintf(os.Stderr, "  3. Replace %s with %s\n", idxOrig, idxRecov)
+			fmt.Fprintf(os.Stderr, "\n")
+
+			if *force {
+				fmt.Fprintf(os.Stderr, "Proceeding (--force)...\n")
+			} else {
+				fmt.Fprintf(os.Stderr, "Type 'yes' to confirm replacement: ")
+				reader := bufio.NewReader(os.Stdin)
+				answer, _ := reader.ReadString('\n')
+				answer = strings.TrimSpace(answer)
+				if answer != "yes" {
+					fmt.Fprintf(os.Stderr, "Aborted. Original files unchanged.\n")
+					os.Exit(0)
+				}
+			}
+
+			if err := rescue.ReplaceOriginal(datPath, *extractPath, logger); err != nil {
+				fmt.Fprintf(os.Stderr, "Error during replacement: %v\n", err)
+				os.Exit(1)
+			}
+			fmt.Fprintf(os.Stderr, "\nReplacement complete. Original volume has been replaced with the recovered version.\n")
+			fmt.Fprintf(os.Stderr, "Backups: %s.bak, %s.bak\n", datPath, idxOrig)
+		} else if *replace && !(vr.Clean && !vr.Regression && len(vr.NeedlesCorrupt) == 0 && len(vr.NeedlesMissing) == 0) {
+			fmt.Fprintf(os.Stderr, "\nSkipping replacement: verification did not pass with SAFE TO USE verdict.\n")
+			fmt.Fprintf(os.Stderr, "The recovered files are still available at: %s\n", *extractPath)
 		}
 	}
 
