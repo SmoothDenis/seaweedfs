@@ -2,6 +2,7 @@ package rescue
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -109,6 +110,77 @@ func UnlockFile(lockFile *os.File) {
 	syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
 	lockFile.Close()
 	os.Remove(lockPath)
+}
+
+// BackupVolume copies the original .dat and .idx files to the specified backup directory.
+// The backup directory is created if it doesn't exist.
+// Returns paths to the backed-up files.
+func BackupVolume(datPath string, backupDir string, log Logger) (bakDat string, bakIdx string, err error) {
+	if err := os.MkdirAll(backupDir, 0755); err != nil {
+		return "", "", fmt.Errorf("create backup directory %s: %w", backupDir, err)
+	}
+
+	baseDat := filepath.Base(datPath)
+	baseIdx := baseDat[:len(baseDat)-4] + ".idx"
+	idxPath := datPath[:len(datPath)-4] + ".idx"
+
+	bakDat = filepath.Join(backupDir, baseDat)
+	bakIdx = filepath.Join(backupDir, baseIdx)
+
+	// Check backup files don't already exist
+	if _, err := os.Stat(bakDat); err == nil {
+		return "", "", fmt.Errorf("backup already exists: %s (remove it first)", bakDat)
+	}
+	if _, err := os.Stat(bakIdx); err == nil {
+		return "", "", fmt.Errorf("backup already exists: %s (remove it first)", bakIdx)
+	}
+
+	// Copy .dat
+	if log != nil {
+		log("backup: copying %s -> %s", datPath, bakDat)
+	}
+	if err := copyFile(datPath, bakDat); err != nil {
+		return "", "", fmt.Errorf("backup .dat: %w", err)
+	}
+
+	// Copy .idx if it exists
+	if _, statErr := os.Stat(idxPath); statErr == nil {
+		if log != nil {
+			log("backup: copying %s -> %s", idxPath, bakIdx)
+		}
+		if err := copyFile(idxPath, bakIdx); err != nil {
+			os.Remove(bakDat) // rollback
+			return "", "", fmt.Errorf("backup .idx: %w", err)
+		}
+	} else {
+		bakIdx = "" // no idx to backup
+	}
+
+	if log != nil {
+		log("backup: done")
+	}
+	return bakDat, bakIdx, nil
+}
+
+// copyFile copies src to dst using atomic write (temp + fsync + rename).
+func copyFile(src, dst string) error {
+	srcFile, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer srcFile.Close()
+
+	sw, err := NewSafeWriter(dst)
+	if err != nil {
+		return err
+	}
+
+	if _, err := io.Copy(sw.File(), srcFile); err != nil {
+		sw.Abort()
+		return err
+	}
+
+	return sw.Commit()
 }
 
 // ReplaceOriginal backs up the original .dat and .idx, then atomically replaces them

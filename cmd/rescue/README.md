@@ -1,0 +1,190 @@
+# weed-rescue — SeaweedFS Volume Recovery Tool
+
+Standalone tool for scanning, diagnosing, and recovering corrupted SeaweedFS volume `.dat` files.
+
+## Features
+
+- **Non-destructive scan** — source `.dat` is opened read-only, never modified
+- **Deep scan** — recovers needles from corruption gaps via byte-by-byte scanning and V3 tail-pattern heuristics
+- **CRC repair** — fixes single-byte bit-rot corruption by brute-forcing the correct byte value
+- **Atomic writes** — all output uses temp + fsync + rename to prevent partial files on crash
+- **Backup before modify** — `--backup-dir` copies originals before any operation
+- **Verification** — re-scans output and compares needle-by-needle with the original
+- **Safe replacement** — `--replace` only works after `--verify` passes all checks
+- **IDX cross-reference** — uses `.idx` file to improve scan accuracy
+- **IDX rebuild** — reconstructs `.idx` from needles found in `.dat`
+- **JSON output** — machine-readable output for scripting and monitoring
+- **File lock** — prevents concurrent rescue operations on the same volume
+
+## Build
+
+From the repository root:
+
+```bash
+# Linux (amd64)
+GOOS=linux GOARCH=amd64 go build -o weed-rescue ./cmd/rescue
+
+# Linux (arm64, e.g. AWS Graviton, Raspberry Pi 4)
+GOOS=linux GOARCH=arm64 go build -o weed-rescue ./cmd/rescue
+
+# macOS (Apple Silicon — M1/M2/M3/M4)
+GOOS=darwin GOARCH=arm64 go build -o weed-rescue ./cmd/rescue
+
+# macOS (Intel)
+GOOS=darwin GOARCH=amd64 go build -o weed-rescue ./cmd/rescue
+
+# Windows (amd64)
+GOOS=windows GOARCH=amd64 go build -o weed-rescue.exe ./cmd/rescue
+
+# FreeBSD (amd64)
+GOOS=freebsd GOARCH=amd64 go build -o weed-rescue ./cmd/rescue
+```
+
+### Build all platforms at once
+
+```bash
+for os_arch in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 freebsd/amd64; do
+  IFS='/' read -r GOOS GOARCH <<< "$os_arch"
+  ext="" && [ "$GOOS" = "windows" ] && ext=".exe"
+  GOOS=$GOOS GOARCH=$GOARCH go build -o "weed-rescue-${GOOS}-${GOARCH}${ext}" ./cmd/rescue
+done
+```
+
+## Quick Start
+
+### 1. Health check (scan only)
+
+```bash
+weed-rescue /data/volumes/42.dat
+```
+
+Reports volume status: needle counts, corruption gaps, CRC mismatches.
+
+### 2. Full recovery pipeline
+
+```bash
+weed-rescue \
+  --backup-dir /backup/vol42 \
+  --deep \
+  --repair \
+  --extract /tmp/42_recovered.dat \
+  --verify \
+  /data/volumes/42.dat
+```
+
+This runs all steps in order:
+1. **Backup** — copies `42.dat` and `42.idx` to `/backup/vol42/`
+2. **Scan** — sequential + deep scan + tail recovery
+3. **Repair** — fixes single-byte CRC corruption
+4. **Extract** — writes clean `.dat` + `.idx` to `/tmp/42_recovered.dat`
+5. **Verify** — re-scans output and compares with original
+
+### 3. Preview repairs (no files written)
+
+```bash
+weed-rescue --repair --dry-run /data/volumes/42.dat
+```
+
+Shows which corrupted needles can be fixed and the exact byte changes.
+
+### 4. Full automated recovery with replacement
+
+```bash
+weed-rescue \
+  --backup-dir /backup/vol42 \
+  --deep \
+  --repair \
+  --extract /tmp/42_recovered.dat \
+  --verify \
+  --replace \
+  --force \
+  /data/volumes/42.dat
+```
+
+Same as #2, but also replaces the original files if verification passes. `--force` skips the confirmation prompt.
+
+## Usage Reference
+
+```
+weed-rescue [flags] <volume.dat>
+```
+
+### Flags
+
+| Flag | Description |
+|---|---|
+| `--idx <path>` | Path to `.idx` file for cross-referencing (improves accuracy) |
+| `--version <2\|3>` | Force needle version (default: auto-detect from superblock) |
+| `--deep` | Enable deep scan + tail-pattern recovery (slower, better recovery) |
+| `--repair` | Attempt single-byte CRC repair on corrupted needles |
+| `--dry-run` | With `--repair`: preview fixes without writing files |
+| `--extract <path.dat>` | Extract valid needles to a new clean `.dat` + `.idx` |
+| `--include-corrupted` | Include corrupted-data needles in `--extract` (partial data) |
+| `--verify` | Re-scan output after `--extract` and compare with original |
+| `--replace` | After `--verify` passes, replace original with recovered volume |
+| `--backup-dir <dir>` | Copy original `.dat` and `.idx` here before any modifications |
+| `--rebuildIdx` | Rebuild `.idx` from needles found in `.dat` |
+| `--force` | Skip confirmation prompts, overwrite existing output files |
+| `--verbose` | Show detailed per-needle output |
+| `--json` | Output results as JSON |
+| `--quiet` | Suppress progress logging |
+| `-V` | Print version and exit |
+
+### Exit Codes
+
+| Code | Meaning |
+|---|---|
+| 0 | Volume is healthy, no corruption found |
+| 1 | Usage error, invalid flags, or pre-flight failure |
+| 2 | Corruption detected in source volume |
+| 3 | Verification failed: output has regressions (DO NOT USE output) |
+
+## Recovery Pipeline Detail
+
+```
+┌─────────────┐
+│  --backup-dir│  Step 1: Copy originals to safe location
+└──────┬──────┘
+       ▼
+┌─────────────┐
+│    SCAN      │  Step 2: Sequential scan → deep scan → tail recovery
+└──────┬──────┘
+       ▼
+┌─────────────┐
+│   --repair   │  Step 3: Single-byte CRC repair (brute-force 256 values)
+└──────┬──────┘
+       ▼
+┌─────────────┐
+│  --extract   │  Step 4: Write valid + repaired needles to new .dat + .idx
+└──────┬──────┘
+       ▼
+┌─────────────┐
+│  --verify    │  Step 5: Re-scan output, compare needle-by-needle
+└──────┬──────┘
+       ▼
+┌─────────────┐
+│  --replace   │  Step 6: Swap original with recovered (if verify passed)
+└─────────────┘
+```
+
+## How CRC Repair Works
+
+When bit rot corrupts a single byte in a needle's data:
+
+1. The stored CRC32-C no longer matches the computed CRC
+2. `--repair` tries each byte position (0..DataSize) × each value (0..255)
+3. For each candidate, it computes CRC32-C and checks against the stored value
+4. If exactly one single-byte change fixes the CRC, the needle is repaired
+5. Multi-byte corruption is detected and reported as "not auto-repairable"
+
+Performance: ~2.5 billion CRC ops for a 10 MB needle (a few seconds). Needles larger than 10 MB are skipped.
+
+## Safety Model
+
+- **Source is never modified** — all reads are via `ReadAt` on a read-only file descriptor
+- **Atomic output** — writes go to a temp file, then `fsync` + `rename`
+- **File lock** — `flock(LOCK_EX|LOCK_NB)` prevents concurrent runs on the same volume
+- **Pre-flight checks** — validates disk space, permissions, and existing files before starting
+- **Verification** — `--verify` re-scans the output from scratch and checks every needle's CRC
+- **Rollback on failure** — `--replace` rolls back all changes if any step fails mid-operation
+- **Backup** — `--backup-dir` creates a byte-for-byte copy before touching anything

@@ -11,40 +11,144 @@ import (
 	"github.com/seaweedfs/seaweedfs/rescue"
 )
 
-func main() {
-	idxPath := flag.String("idx", "", "path to .idx file (improves recovery)")
-	version := flag.Int("version", 0, "needle version (2 or 3, default: auto-detect)")
-	rebuildIdx := flag.Bool("rebuildIdx", false, "rebuild .idx from scan results")
-	extractPath := flag.String("extract", "", "extract valid needles to a new clean .dat + .idx")
-	deep := flag.Bool("deep", false, "enable deep scan for maximum recovery (slower)")
-	verbose := flag.Bool("verbose", false, "show detailed per-needle output")
-	jsonOutput := flag.Bool("json", false, "output results as JSON")
-	quiet := flag.Bool("quiet", false, "suppress progress logging (only output report)")
-	includeCorrupted := flag.Bool("include-corrupted", false, "include corrupted-data needles in extract (data may be partially damaged)")
-	repair := flag.Bool("repair", false, "attempt single-byte CRC repair on corrupted needles and extract repaired data")
-	verify := flag.Bool("verify", false, "re-scan output after extract/repair and show before/after comparison")
-	dryRun := flag.Bool("dry-run", false, "with --repair: show what would be fixed without writing files")
+const version = "1.0.0"
 
-	replace := flag.Bool("replace", false, "after successful --verify, replace original volume with recovered one (prompts for confirmation)")
+func main() {
+	// --- Flags ---
+	idxPath := flag.String("idx", "", "path to .idx file for cross-referencing (improves recovery accuracy)")
+	needleVersion := flag.Int("version", 0, "needle version: 2 or 3 (default: auto-detect from superblock)")
+	rebuildIdx := flag.Bool("rebuildIdx", false, "rebuild .idx file from scan results (overwrites existing .idx)")
+	extractPath := flag.String("extract", "", "extract valid needles to a new clean .dat + .idx at this path")
+	deep := flag.Bool("deep", false, "enable deep scan + tail-pattern recovery for maximum data recovery (slower)")
+	verbose := flag.Bool("verbose", false, "show detailed per-needle output in the report")
+	jsonOutput := flag.Bool("json", false, "output scan results as JSON instead of human-readable report")
+	quiet := flag.Bool("quiet", false, "suppress progress logging (only output the final report)")
+	includeCorrupted := flag.Bool("include-corrupted", false, "include corrupted-data needles in --extract (data may be partially damaged)")
+	repair := flag.Bool("repair", false, "attempt single-byte CRC repair on corrupted needles before extracting")
+	verify := flag.Bool("verify", false, "re-scan output after --extract and show before/after comparison with verdict")
+	dryRun := flag.Bool("dry-run", false, "with --repair: preview which needles can be fixed without writing files")
+	replace := flag.Bool("replace", false, "after --verify passes, replace original volume with the recovered one")
 	force := flag.Bool("force", false, "skip confirmation prompts and overwrite existing output files")
+	backupDir := flag.String("backup-dir", "", "copy original .dat and .idx to this directory before any modifications")
+	showVersion := flag.Bool("V", false, "print version and exit")
 
 	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "Usage: weed-rescue [flags] <path-to-dat-file>\n\n")
-		fmt.Fprintf(os.Stderr, "Scans a SeaweedFS volume .dat file for valid and corrupted needles.\n")
-		fmt.Fprintf(os.Stderr, "Can recover data from corrupted volumes using CRC32 validation.\n\n")
-		fmt.Fprintf(os.Stderr, "SAFETY: The source .dat file is NEVER modified. All write operations\n")
-		fmt.Fprintf(os.Stderr, "produce new files. Writes use atomic temp+fsync+rename to prevent\n")
-		fmt.Fprintf(os.Stderr, "partial files on crash. A file lock prevents concurrent runs.\n\n")
-		fmt.Fprintf(os.Stderr, "Exit codes:\n")
-		fmt.Fprintf(os.Stderr, "  0  Volume is healthy, no corruption found\n")
-		fmt.Fprintf(os.Stderr, "  1  Usage error, invalid flags, pre-flight failure\n")
-		fmt.Fprintf(os.Stderr, "  2  Corruption detected in source volume\n")
-		fmt.Fprintf(os.Stderr, "  3  Verification failed: output has regressions (DO NOT USE)\n\n")
-		fmt.Fprintf(os.Stderr, "Flags:\n")
+		w := os.Stderr
+		fmt.Fprintf(w, `weed-rescue v%s — SeaweedFS Volume Recovery Tool
+
+USAGE
+  weed-rescue [flags] <volume.dat>
+
+DESCRIPTION
+  Scans a SeaweedFS volume .dat file and recovers data from corrupted volumes.
+  Supports needle versions 2 and 3 with CRC32-C validation. The source .dat
+  file is NEVER modified — all operations produce new files.
+
+SAFETY GUARANTEES
+  • Source .dat is opened read-only and never written to
+  • All output files use atomic writes (temp + fsync + rename)
+  • Exclusive file lock prevents concurrent rescue operations
+  • --backup-dir creates a full copy before any destructive operation
+  • --verify re-scans the output and compares it needle-by-needle
+  • --replace requires --verify to pass before touching originals
+
+SCAN MODES
+  Basic scan (default):
+    Sequential scan of the .dat file, validating each needle header and CRC.
+    Reports valid, deleted, and corrupted needles with corruption gaps.
+
+  Deep scan (--deep):
+    After basic scan, re-scans corruption gaps byte-by-byte looking for
+    valid needles with corrupted/overwritten headers. Also performs V3
+    tail-pattern recovery using timestamp heuristics.
+
+  With .idx cross-reference (--idx):
+    Uses the .idx file as a guide for phase 1 validation, improving
+    accuracy and detecting offset mismatches.
+
+RECOVERY PIPELINE
+  The recommended full recovery pipeline is:
+
+    1. BACKUP     --backup-dir /safe/path
+    2. SCAN       (automatic, always runs first)
+    3. REPAIR     --repair (attempts single-byte CRC fix)
+    4. EXTRACT    --extract recovered.dat (writes clean volume)
+    5. VERIFY     --verify (re-scans output, compares with original)
+    6. REPLACE    --replace (swaps original with recovered)
+
+  All steps can be combined in a single command:
+    weed-rescue --backup-dir /backup --deep --repair \
+      --extract /tmp/recovered.dat --verify --replace volume.dat
+
+FLAGS
+`, version)
 		flag.PrintDefaults()
+		fmt.Fprintf(w, `
+EXIT CODES
+  0   Volume is healthy, no corruption found
+  1   Usage error, invalid flags, or pre-flight failure
+  2   Corruption detected in source volume
+  3   Verification failed: output has regressions (DO NOT USE output)
+
+EXAMPLES
+  # Quick health check — just scan and report
+  weed-rescue /data/volumes/42.dat
+
+  # Scan with .idx cross-reference for better accuracy
+  weed-rescue --idx /data/volumes/42.idx /data/volumes/42.dat
+
+  # Full recovery: backup + deep scan + repair + extract + verify
+  weed-rescue --backup-dir /backup/vol42 --deep --repair \
+    --extract /tmp/42_recovered.dat --verify /data/volumes/42.dat
+
+  # Preview repairs without writing anything
+  weed-rescue --repair --dry-run /data/volumes/42.dat
+
+  # Full automated recovery with replacement (no prompts)
+  weed-rescue --backup-dir /backup/vol42 --deep --repair \
+    --extract /tmp/42_recovered.dat --verify --replace --force \
+    /data/volumes/42.dat
+
+  # Extract only valid needles (skip corrupted), verify output
+  weed-rescue --extract /tmp/clean.dat --verify /data/volumes/42.dat
+
+  # Include corrupted needles in extract (partial data, no repair)
+  weed-rescue --extract /tmp/all.dat --include-corrupted /data/volumes/42.dat
+
+  # Rebuild .idx from what's found in the .dat
+  weed-rescue --rebuildIdx /data/volumes/42.dat
+
+  # JSON output for scripting
+  weed-rescue --json /data/volumes/42.dat
+
+BUILD
+  # Linux (amd64)
+  GOOS=linux GOARCH=amd64 go build -o weed-rescue ./cmd/rescue
+
+  # Linux (arm64)
+  GOOS=linux GOARCH=arm64 go build -o weed-rescue ./cmd/rescue
+
+  # macOS (Apple Silicon)
+  GOOS=darwin GOARCH=arm64 go build -o weed-rescue ./cmd/rescue
+
+  # macOS (Intel)
+  GOOS=darwin GOARCH=amd64 go build -o weed-rescue ./cmd/rescue
+
+  # Windows
+  GOOS=windows GOARCH=amd64 go build -o weed-rescue.exe ./cmd/rescue
+
+  # FreeBSD
+  GOOS=freebsd GOARCH=amd64 go build -o weed-rescue ./cmd/rescue
+
+`)
 	}
 
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Printf("weed-rescue v%s\n", version)
+		os.Exit(0)
+	}
 
 	if flag.NArg() != 1 {
 		flag.Usage()
@@ -75,8 +179,8 @@ func main() {
 	}
 
 	// Version validation
-	if *version != 0 && (*version < 2 || *version > 3) {
-		errors = append(errors, fmt.Sprintf("--version must be 2 or 3, got %d", *version))
+	if *needleVersion != 0 && (*needleVersion < 2 || *needleVersion > 3) {
+		errors = append(errors, fmt.Sprintf("--version must be 2 or 3, got %d", *needleVersion))
 	}
 
 	// Flag combination validation
@@ -131,9 +235,32 @@ func main() {
 		}
 	}
 
+	// --- Step 1: Backup original if --backup-dir specified ---
+	if *backupDir != "" {
+		if logger != nil {
+			logger("=== Step 1/6: Backup ===")
+		}
+		bakDat, bakIdx, err := rescue.BackupVolume(datPath, *backupDir, logger)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error creating backup: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Fprintf(os.Stderr, "Backup complete:\n")
+		fmt.Fprintf(os.Stderr, "  .dat: %s\n", bakDat)
+		if bakIdx != "" {
+			fmt.Fprintf(os.Stderr, "  .idx: %s\n", bakIdx)
+		}
+		fmt.Fprintf(os.Stderr, "\n")
+	}
+
+	// --- Step 2: Scan ---
+	if logger != nil {
+		logger("=== Step 2/6: Scan ===")
+	}
+
 	scanner := rescue.NewScanner(datPath)
 	scanner.IdxPath = *idxPath
-	scanner.Version = *version
+	scanner.Version = *needleVersion
 	scanner.DeepScan = *deep
 	scanner.Verbose = *verbose
 	scanner.Log = logger
@@ -163,7 +290,7 @@ func main() {
 		rescue.PrintReport(os.Stdout, result, *verbose, gapSigs)
 	}
 
-	// Rebuild .idx if requested
+	// --- Step 3: Rebuild .idx if requested ---
 	if *rebuildIdx {
 		idxOutPath := datPath[:len(datPath)-4] + ".idx"
 		count, err := rescue.RebuildIdx(datPath, result)
@@ -174,8 +301,11 @@ func main() {
 		fmt.Fprintf(os.Stderr, "Rebuilt %s with %d entries\n", idxOutPath, count)
 	}
 
-	// Extract valid data if requested
+	// --- Step 4: Repair + Extract ---
 	if *extractPath != "" && !*repair {
+		if logger != nil {
+			logger("=== Step 4/6: Extract ===")
+		}
 		count, err := rescue.ExtractValidNeedles(datPath, result, *extractPath, *includeCorrupted)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error extracting: %v\n", err)
@@ -185,8 +315,10 @@ func main() {
 		fmt.Fprintf(os.Stderr, "\nExtracted %d valid needles to %s (idx: %s)\n", count, *extractPath, idxOutPath)
 	}
 
-	// Repair: dry-run or actual
 	if *repair && *dryRun {
+		if logger != nil {
+			logger("=== Step 4/6: Repair (dry-run) ===")
+		}
 		repairs, err := rescue.DryRunRepair(datPath, result, logger)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error during dry-run: %v\n", err)
@@ -203,6 +335,9 @@ func main() {
 			}
 		}
 	} else if *repair && *extractPath != "" {
+		if logger != nil {
+			logger("=== Step 4/6: Repair + Extract ===")
+		}
 		extracted, repaired, err := rescue.RepairAndExtract(datPath, result, *extractPath, logger)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error during repair+extract: %v\n", err)
@@ -212,8 +347,11 @@ func main() {
 		fmt.Fprintf(os.Stderr, "\nRepaired %d needles, extracted %d total to %s (idx: %s)\n", repaired, extracted, *extractPath, idxOutPath)
 	}
 
-	// Verify output if requested
+	// --- Step 5: Verify ---
 	if *verify && *extractPath != "" {
+		if logger != nil {
+			logger("=== Step 5/6: Verify ===")
+		}
 		vr, idxIssues, err := rescue.VerifyExtractedVolume(*extractPath, result, logger)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error during verification: %v\n", err)
@@ -230,8 +368,11 @@ func main() {
 			os.Exit(3)
 		}
 
-		// Replace original with recovered if requested and verification passed
+		// --- Step 6: Replace ---
 		if *replace && vr.Clean && !vr.Regression && len(vr.NeedlesCorrupt) == 0 && len(vr.NeedlesMissing) == 0 {
+			if logger != nil {
+				logger("=== Step 6/6: Replace ===")
+			}
 			fmt.Fprintf(os.Stderr, "\n")
 			fmt.Fprintf(os.Stderr, "=== Replace Original Volume ===\n")
 			fmt.Fprintf(os.Stderr, "This will:\n")
@@ -240,6 +381,9 @@ func main() {
 			idxOrig := datPath[:len(datPath)-4] + ".idx"
 			idxRecov := (*extractPath)[:len(*extractPath)-4] + ".idx"
 			fmt.Fprintf(os.Stderr, "  3. Replace %s with %s\n", idxOrig, idxRecov)
+			if *backupDir != "" {
+				fmt.Fprintf(os.Stderr, "\n  (Full backup already saved to %s)\n", *backupDir)
+			}
 			fmt.Fprintf(os.Stderr, "\n")
 
 			if *force {
