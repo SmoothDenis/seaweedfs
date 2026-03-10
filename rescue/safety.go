@@ -1,6 +1,8 @@
 package rescue
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
@@ -181,6 +183,50 @@ func copyFile(src, dst string) error {
 	}
 
 	return sw.Commit()
+}
+
+// VerifyBackup compares SHA-256 checksums of the original and backup files.
+// Returns nil if they match, or an error describing the mismatch.
+func VerifyBackup(originalPath, backupPath string, log Logger) error {
+	if log != nil {
+		log("verify-backup: computing SHA-256 of %s", originalPath)
+	}
+	origHash, err := sha256File(originalPath)
+	if err != nil {
+		return fmt.Errorf("hash original %s: %w", originalPath, err)
+	}
+
+	if log != nil {
+		log("verify-backup: computing SHA-256 of %s", backupPath)
+	}
+	bakHash, err := sha256File(backupPath)
+	if err != nil {
+		return fmt.Errorf("hash backup %s: %w", backupPath, err)
+	}
+
+	if origHash != bakHash {
+		return fmt.Errorf("SHA-256 mismatch: original=%s backup=%s — backup is corrupted", origHash, bakHash)
+	}
+
+	if log != nil {
+		log("verify-backup: OK — SHA-256 match: %s", origHash)
+	}
+	return nil
+}
+
+// sha256File computes the SHA-256 hash of a file and returns it as a hex string.
+func sha256File(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // ReplaceOriginal backs up the original .dat and .idx, then atomically replaces them

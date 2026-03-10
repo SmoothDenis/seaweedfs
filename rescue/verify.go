@@ -177,9 +177,9 @@ func joinLines(parts []string) string {
 
 // PrintVerifyReport writes the verification results to w.
 func PrintVerifyReport(w io.Writer, vr *VerifyResult) {
-	fmt.Fprintf(w, "\n=== Verification Report ===\n\n")
+	fmt.Fprintf(w, "\n=== Verification Report (Before / After) ===\n\n")
 
-	fmt.Fprintf(w, "%-20s %10s %10s %10s\n", "", "Original", "Output", "Delta")
+	fmt.Fprintf(w, "%-20s %10s %10s %10s\n", "", "Before", "After", "Delta")
 	fmt.Fprintf(w, "%-20s %10s %10s %10s\n", "--------------------", "----------", "----------", "----------")
 
 	printRow := func(label string, orig, out int) {

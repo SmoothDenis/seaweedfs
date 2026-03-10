@@ -73,11 +73,11 @@ weed-rescue \
 ```
 
 This runs all steps in order:
-1. **Backup** — copies `42.dat` and `42.idx` to `/backup/vol42/`
+1. **Backup** — copies `42.dat` and `42.idx` to `/backup/vol42/`, then verifies SHA-256 checksums match
 2. **Scan** — sequential + deep scan + tail recovery
 3. **Repair** — fixes single-byte CRC corruption
-4. **Extract** — writes clean `.dat` + `.idx` to `/tmp/42_recovered.dat`
-5. **Verify** — re-scans output and compares with original
+4. **Extract** — writes valid + repaired needles to clean `.dat` + `.idx`
+5. **Verify** — re-scans output, shows before/after comparison table with verdict
 
 ### 3. Preview repairs (no files written)
 
@@ -143,7 +143,7 @@ weed-rescue [flags] <volume.dat>
 
 ```
 ┌─────────────┐
-│  --backup-dir│  Step 1: Copy originals to safe location
+│  --backup-dir│  Step 1: Copy originals + SHA-256 verify
 └──────┬──────┘
        ▼
 ┌─────────────┐
@@ -159,7 +159,7 @@ weed-rescue [flags] <volume.dat>
 └──────┬──────┘
        ▼
 ┌─────────────┐
-│  --verify    │  Step 5: Re-scan output, compare needle-by-needle
+│  --verify    │  Step 5: Re-scan output, before/after comparison
 └──────┬──────┘
        ▼
 ┌─────────────┐
@@ -187,4 +187,4 @@ Performance: ~2.5 billion CRC ops for a 10 MB needle (a few seconds). Needles la
 - **Pre-flight checks** — validates disk space, permissions, and existing files before starting
 - **Verification** — `--verify` re-scans the output from scratch and checks every needle's CRC
 - **Rollback on failure** — `--replace` rolls back all changes if any step fails mid-operation
-- **Backup** — `--backup-dir` creates a byte-for-byte copy before touching anything
+- **Backup** — `--backup-dir` creates a byte-for-byte copy + SHA-256 verification before proceeding

@@ -48,7 +48,7 @@ SAFETY GUARANTEES
   • Source .dat is opened read-only and never written to
   • All output files use atomic writes (temp + fsync + rename)
   • Exclusive file lock prevents concurrent rescue operations
-  • --backup-dir creates a full copy before any destructive operation
+  • --backup-dir creates a full copy + SHA-256 verification before proceeding
   • --verify re-scans the output and compares it needle-by-needle
   • --replace requires --verify to pass before touching originals
 
@@ -69,11 +69,11 @@ SCAN MODES
 RECOVERY PIPELINE
   The recommended full recovery pipeline is:
 
-    1. BACKUP     --backup-dir /safe/path
+    1. BACKUP     --backup-dir /safe/path (copy + SHA-256 verify)
     2. SCAN       (automatic, always runs first)
     3. REPAIR     --repair (attempts single-byte CRC fix)
     4. EXTRACT    --extract recovered.dat (writes clean volume)
-    5. VERIFY     --verify (re-scans output, compares with original)
+    5. VERIFY     --verify (re-scans output, compares before/after)
     6. REPLACE    --replace (swaps original with recovered)
 
   All steps can be combined in a single command:
@@ -250,7 +250,25 @@ BUILD
 		if bakIdx != "" {
 			fmt.Fprintf(os.Stderr, "  .idx: %s\n", bakIdx)
 		}
-		fmt.Fprintf(os.Stderr, "\n")
+
+		// Verify backup integrity via SHA-256
+		if logger != nil {
+			logger("backup: verifying SHA-256 checksums...")
+		}
+		if err := rescue.VerifyBackup(datPath, bakDat, logger); err != nil {
+			fmt.Fprintf(os.Stderr, "FATAL: backup verification failed for .dat: %v\n", err)
+			fmt.Fprintf(os.Stderr, "Aborting — backup is not a faithful copy. Will not proceed.\n")
+			os.Exit(1)
+		}
+		if bakIdx != "" {
+			idxPath := datPath[:len(datPath)-4] + ".idx"
+			if err := rescue.VerifyBackup(idxPath, bakIdx, logger); err != nil {
+				fmt.Fprintf(os.Stderr, "FATAL: backup verification failed for .idx: %v\n", err)
+				fmt.Fprintf(os.Stderr, "Aborting — backup is not a faithful copy. Will not proceed.\n")
+				os.Exit(1)
+			}
+		}
+		fmt.Fprintf(os.Stderr, "Backup verified: SHA-256 checksums match.\n\n")
 	}
 
 	// --- Step 2: Scan ---
