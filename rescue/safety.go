@@ -255,12 +255,21 @@ func ReplaceOriginal(originalDatPath, recoveredDatPath string, log Logger) error
 		return fmt.Errorf("backup already exists: %s (remove it first or use a different path)", bakIdxPath)
 	}
 
+	// Write marker file so a crashed replace can be diagnosed/recovered
+	markerPath := originalDatPath + ".rescue-replace-in-progress"
+	markerContent := fmt.Sprintf("original_dat=%s\noriginal_idx=%s\nrecovered_dat=%s\nrecovered_idx=%s\nbak_dat=%s\nbak_idx=%s\n",
+		originalDatPath, originalIdxPath, recoveredDatPath, recoveredIdxPath, bakDatPath, bakIdxPath)
+	if err := os.WriteFile(markerPath, []byte(markerContent), 0644); err != nil {
+		return fmt.Errorf("write replace marker: %w", err)
+	}
+
 	if log != nil {
 		log("replace: backing up %s -> %s", originalDatPath, bakDatPath)
 	}
 
 	// Step 1: Rename original .dat to .bak
 	if err := os.Rename(originalDatPath, bakDatPath); err != nil {
+		os.Remove(markerPath)
 		return fmt.Errorf("backup original .dat: %w", err)
 	}
 
@@ -272,6 +281,7 @@ func ReplaceOriginal(originalDatPath, recoveredDatPath string, log Logger) error
 		if err := os.Rename(originalIdxPath, bakIdxPath); err != nil {
 			// Rollback: restore .dat
 			os.Rename(bakDatPath, originalDatPath)
+			os.Remove(markerPath)
 			return fmt.Errorf("backup original .idx (dat restored): %w", err)
 		}
 	}
@@ -285,6 +295,7 @@ func ReplaceOriginal(originalDatPath, recoveredDatPath string, log Logger) error
 		// Rollback: restore both originals
 		os.Rename(bakDatPath, originalDatPath)
 		os.Rename(bakIdxPath, originalIdxPath)
+		os.Remove(markerPath)
 		return fmt.Errorf("move recovered .dat into place (originals restored): %w", err)
 	}
 
@@ -294,8 +305,12 @@ func ReplaceOriginal(originalDatPath, recoveredDatPath string, log Logger) error
 		os.Rename(originalDatPath, recoveredDatPath)
 		os.Rename(bakDatPath, originalDatPath)
 		os.Rename(bakIdxPath, originalIdxPath)
+		os.Remove(markerPath)
 		return fmt.Errorf("move recovered .idx into place (originals restored): %w", err)
 	}
+
+	// Success — remove marker
+	os.Remove(markerPath)
 
 	if log != nil {
 		log("replace: done — originals backed up as .bak")

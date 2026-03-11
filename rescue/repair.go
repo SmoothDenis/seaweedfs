@@ -12,15 +12,17 @@ import (
 
 // RepairResult describes the outcome of a CRC repair attempt on one needle.
 type RepairResult struct {
-	NeedleId    uint64
-	Offset      int64
-	DataSize    uint32
-	ByteOffset  int    // position within file data where corruption was found (-1 if not repairable)
-	OrigByte    byte   // original (corrupted) byte value
-	FixedByte   byte   // correct byte value
-	StoredCRC   uint32 // CRC from the needle tail
-	Repaired    bool   // true if single-byte fix was found
-	MultiErrors bool   // true if data has more than one corrupted byte (not auto-repairable)
+	NeedleId       uint64
+	Offset         int64
+	DataSize       uint32
+	ByteOffset     int    // position within file data where corruption was found (-1 if not repairable)
+	OrigByte       byte   // original (corrupted) byte value
+	FixedByte      byte   // correct byte value
+	StoredCRC      uint32 // CRC from the needle tail
+	Repaired       bool   // true if exactly one single-byte fix was found
+	MultiErrors    bool   // true if data has more than one corrupted byte (not auto-repairable)
+	Ambiguous      bool   // true if multiple single-byte fixes found (CRC collision — unsafe to apply)
+	AmbiguousCount int    // number of different single-byte fixes that match the CRC
 }
 
 // maxRepairDataSize is the largest file data we'll attempt byte-level repair on.
@@ -58,7 +60,17 @@ func AttemptRepair(datFile *os.File, rec NeedleRecord, version int) RepairResult
 		return result
 	}
 
-	// Try each byte position
+	// Try each byte position — collect ALL matches to detect CRC collisions.
+	// CRC32 has ~1/2^32 collision probability per trial. For large needles
+	// (e.g. 10MB × 255 trials ≈ 2.5 billion attempts), false positives are likely.
+	// If multiple fixes are found, we cannot determine which is correct.
+	type match struct {
+		pos      int
+		origByte byte
+		fixByte  byte
+	}
+	var matches []match
+
 	targetCRC := rec.StoredCRC
 	for pos := 0; pos < len(fileData); pos++ {
 		origByte := fileData[pos]
@@ -69,21 +81,31 @@ func AttemptRepair(datFile *os.File, rec NeedleRecord, version int) RepairResult
 			}
 			fileData[pos] = b
 			if crc32.Update(0, crc32cTable, fileData) == targetCRC {
-				// Found the fix — but verify it's truly single-byte by checking
-				// that the rest of the data is consistent
-				result.ByteOffset = pos
-				result.OrigByte = origByte
-				result.FixedByte = b
-				result.Repaired = true
-				fileData[pos] = origByte // restore for continued scanning
-				return result
+				matches = append(matches, match{pos: pos, origByte: origByte, fixByte: b})
+				// Don't break — keep scanning this position for more matches at same byte
 			}
 		}
 		fileData[pos] = origByte // restore original
 	}
 
-	// No single-byte fix found — corruption spans multiple bytes
-	result.MultiErrors = true
+	if len(matches) == 0 {
+		// No single-byte fix found — corruption spans multiple bytes
+		result.MultiErrors = true
+		return result
+	}
+
+	if len(matches) == 1 {
+		// Exactly one fix — safe to apply
+		result.ByteOffset = matches[0].pos
+		result.OrigByte = matches[0].origByte
+		result.FixedByte = matches[0].fixByte
+		result.Repaired = true
+		return result
+	}
+
+	// Multiple fixes found — CRC collision, unsafe to apply
+	result.Ambiguous = true
+	result.AmbiguousCount = len(matches)
 	return result
 }
 
@@ -118,6 +140,11 @@ func DryRunRepair(datPath string, result *ScanResult, log Logger) (*DryRunResult
 			if log != nil {
 				log("  dry-run: needle id=%d FIXABLE — byte %d: 0x%02X → 0x%02X",
 					rec.NeedleId, rr.ByteOffset, rr.OrigByte, rr.FixedByte)
+			}
+		} else if rr.Ambiguous {
+			if log != nil {
+				log("  dry-run: needle id=%d AMBIGUOUS — %d possible fixes (CRC collision, unsafe to apply)",
+					rec.NeedleId, rr.AmbiguousCount)
 			}
 		} else if rr.MultiErrors {
 			if log != nil {
@@ -154,6 +181,11 @@ func RepairAndExtract(srcDatPath string, result *ScanResult, dstDatPath string, 
 			if log != nil {
 				log("  repair: FIXED needle id=%d — byte %d: 0x%02X → 0x%02X",
 					rec.NeedleId, rr.ByteOffset, rr.OrigByte, rr.FixedByte)
+			}
+		} else if rr.Ambiguous {
+			if log != nil {
+				log("  repair: needle id=%d AMBIGUOUS — %d possible fixes (CRC collision, skipping to avoid data corruption)",
+					rec.NeedleId, rr.AmbiguousCount)
 			}
 		} else if rr.MultiErrors {
 			if log != nil {
@@ -272,7 +304,7 @@ var fileSignatures = []struct {
 	{[]byte{0x1F, 0x8B}, 0, "gzip compressed"},
 	{[]byte{0x42, 0x5A, 0x68}, 0, "bzip2 compressed"},
 	{[]byte{0xFD, 0x37, 0x7A, 0x58, 0x5A}, 0, "xz compressed"},
-	{[]byte{0x00, 0x00, 0x00}, 0, "MP4/MOV video"}, // ftyp box (starts with size, then 'ftyp')
+	{[]byte("ftyp"), 4, "MP4/MOV video"}, // ftyp box: 4 bytes size + "ftyp" at offset 4
 	{[]byte("ID3"), 0, "MP3 audio (ID3)"},
 	{[]byte{0xFF, 0xFB}, 0, "MP3 audio"},
 	{[]byte{0xFF, 0xF3}, 0, "MP3 audio"},

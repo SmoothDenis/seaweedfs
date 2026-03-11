@@ -1,6 +1,7 @@
 package rescue
 
 import (
+	"encoding/binary"
 	"fmt"
 	"io"
 	"os"
@@ -20,6 +21,7 @@ type Scanner struct {
 	Log        Logger // progress logging callback
 	datFile    *os.File
 	datSize    int64
+	headerBuf  [NeedleHeaderSize]byte // reused across validateAtOffset calls
 	idxEntries map[uint64]IdxEntry
 }
 
@@ -55,23 +57,45 @@ func (s *Scanner) Run() (*ScanResult, error) {
 		datPath:     s.DatPath,
 	}
 
-	// Read superblock
+	// Read superblock (minimum 8 bytes, may be larger with ExtraSize)
 	if s.datSize < SuperBlockSize {
 		return nil, fmt.Errorf("dat file too small: %d bytes", s.datSize)
 	}
-	result.SuperBlockData = make([]byte, SuperBlockSize)
-	if _, err := s.datFile.ReadAt(result.SuperBlockData, 0); err != nil {
+	header := make([]byte, SuperBlockSize)
+	if _, err := s.datFile.ReadAt(header, 0); err != nil {
 		return nil, fmt.Errorf("read superblock: %w", err)
 	}
 
 	// Auto-detect version from superblock byte 0
 	if s.Version == 0 {
-		s.Version = int(result.SuperBlockData[0])
+		s.Version = int(header[0])
 		if s.Version < 1 || s.Version > 3 {
 			return nil, fmt.Errorf("invalid version %d in superblock", s.Version)
 		}
 	}
+	if s.Version == 1 {
+		return nil, fmt.Errorf("needle version 1 is not supported (only V2 and V3)")
+	}
 	result.Version = s.Version
+
+	// Read ExtraSize from superblock bytes 6-7 (V2/V3 may have protobuf extra data)
+	extraSize := int(binary.BigEndian.Uint16(header[6:8]))
+	superBlockTotal := SuperBlockSize + extraSize
+	if int64(superBlockTotal) > s.datSize {
+		return nil, fmt.Errorf("superblock ExtraSize=%d exceeds file size", extraSize)
+	}
+
+	// Read full superblock including extra data
+	result.SuperBlockData = make([]byte, superBlockTotal)
+	copy(result.SuperBlockData, header)
+	if extraSize > 0 {
+		if _, err := s.datFile.ReadAt(result.SuperBlockData[SuperBlockSize:], SuperBlockSize); err != nil {
+			return nil, fmt.Errorf("read superblock extra data (%d bytes): %w", extraSize, err)
+		}
+		s.log("volume: superblock has %d bytes extra data (total %d bytes)", extraSize, superBlockTotal)
+	}
+	result.SuperBlockSize = superBlockTotal
+
 	s.log("volume: %s (%s, version %d)", s.DatPath, humanSize(s.datSize), s.Version)
 
 	// Load idx if available
@@ -125,7 +149,7 @@ func (s *Scanner) Run() (*ScanResult, error) {
 		for _, rec := range result.Records {
 			seenOffsets[rec.Offset] = true
 		}
-		tailRecovered := RecoverFromTails(s.datFile, result.CorruptionGaps, s.Version, s.Log)
+		tailRecovered := RecoverFromTails(s.datFile, result.CorruptionGaps, s.Version, result.SuperBlockSize, s.Log)
 		added := 0
 		for _, rec := range tailRecovered {
 			if !seenOffsets[rec.Offset] {
@@ -151,7 +175,7 @@ func (s *Scanner) Run() (*ScanResult, error) {
 
 func (s *Scanner) phase1IdxGuided(result *ScanResult) {
 	for _, entry := range s.idxEntries {
-		if entry.Offset < SuperBlockSize || entry.Offset >= s.datSize {
+		if entry.Offset < int64(result.SuperBlockSize) || entry.Offset >= s.datSize {
 			continue
 		}
 		rec := s.validateAtOffset(entry.Offset)
@@ -171,7 +195,7 @@ func (s *Scanner) phase1IdxGuided(result *ScanResult) {
 }
 
 func (s *Scanner) phase2Sequential(result *ScanResult) {
-	offset := int64(SuperBlockSize)
+	offset := int64(result.SuperBlockSize)
 	seenOffsets := make(map[int64]bool)
 	lastProgressPct := -1
 
@@ -280,13 +304,12 @@ func (s *Scanner) phase3Deep(result *ScanResult) {
 }
 
 func (s *Scanner) validateAtOffset(offset int64) *NeedleRecord {
-	// Read header first to determine size
-	headerBuf := make([]byte, NeedleHeaderSize)
-	if _, err := s.datFile.ReadAt(headerBuf, offset); err != nil {
+	// Read header first to determine size (reuse pre-allocated buffer)
+	if _, err := s.datFile.ReadAt(s.headerBuf[:], offset); err != nil {
 		return nil
 	}
 
-	_, _, size := ParseNeedleHeader(headerBuf)
+	_, _, size := ParseNeedleHeader(s.headerBuf[:])
 	if !IsReasonableSize(size) {
 		return nil
 	}

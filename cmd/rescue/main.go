@@ -348,6 +348,8 @@ BUILD
 			if rr.Repaired {
 				fmt.Fprintf(os.Stderr, "  needle id=%-10d byte %d: 0x%02X -> 0x%02X (fixable)\n",
 					rr.NeedleId, rr.ByteOffset, rr.OrigByte, rr.FixedByte)
+			} else if rr.Ambiguous {
+				fmt.Fprintf(os.Stderr, "  needle id=%-10d %d possible fixes (CRC collision, unsafe)\n", rr.NeedleId, rr.AmbiguousCount)
 			} else if rr.MultiErrors {
 				fmt.Fprintf(os.Stderr, "  needle id=%-10d multi-byte corruption (not fixable)\n", rr.NeedleId)
 			}

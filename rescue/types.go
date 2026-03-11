@@ -79,6 +79,7 @@ type ScanStats struct {
 type ScanResult struct {
 	Version        int
 	SuperBlockData []byte
+	SuperBlockSize int    // actual superblock size in bytes (8 + ExtraSize)
 	DatFileSize    int64
 	Records        []NeedleRecord
 	CorruptionGaps []Gap

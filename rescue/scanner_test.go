@@ -107,7 +107,7 @@ func writeIdxFile(t *testing.T, dir string, entries []IdxEntry) string {
 	}
 	defer f.Close()
 
-	buf := make([]byte, IdxEntrySize)
+	buf := make([]byte, IdxEntrySize4)
 	for _, e := range entries {
 		binary.BigEndian.PutUint64(buf[0:8], e.NeedleId)
 		binary.BigEndian.PutUint32(buf[8:12], uint32(e.Offset/NeedlePaddingSize))

@@ -91,7 +91,7 @@ func TestTailRecoverySkipsV2(t *testing.T) {
 	defer datFile.Close()
 
 	gaps := []Gap{{StartOffset: SuperBlockSize, EndOffset: 1024}}
-	recovered := RecoverFromTails(datFile, gaps, 2, nil)
+	recovered := RecoverFromTails(datFile, gaps, 2, SuperBlockSize, nil)
 	if len(recovered) != 0 {
 		t.Errorf("V2 should not produce tail recoveries, got %d", len(recovered))
 	}

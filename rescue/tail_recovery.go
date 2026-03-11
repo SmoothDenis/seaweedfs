@@ -35,7 +35,7 @@ type TailCandidate struct {
 //
 // This is the "last resort" recovery — it works even when the needle header is
 // partially overwritten, as long as the tail and data are intact.
-func RecoverFromTails(datFile *os.File, gaps []Gap, version int, log Logger) []NeedleRecord {
+func RecoverFromTails(datFile *os.File, gaps []Gap, version int, superBlockSize int, log Logger) []NeedleRecord {
 	if version != 3 {
 		// Tail recovery relies on V3 timestamps; V2 has no timestamp to anchor on
 		return nil
@@ -78,7 +78,7 @@ func RecoverFromTails(datFile *os.File, gaps []Gap, version int, log Logger) []N
 
 			// Candidate tail found at absolute offset gap.StartOffset + i.
 			tailAbsOffset := gap.StartOffset + int64(i)
-			rec := tryReconstructFromTail(datFile, tailAbsOffset, storedCRC, timestamp, gap, version, fileSize)
+			rec := tryReconstructFromTail(datFile, tailAbsOffset, storedCRC, timestamp, gap, version, fileSize, superBlockSize)
 			if rec != nil {
 				rec.Source = "tail-recovery"
 				rec.Status = StatusRecovered
@@ -107,7 +107,7 @@ func RecoverFromTails(datFile *os.File, gaps []Gap, version int, log Logger) []N
 // CRC over candidate data, and check if it matches the stored CRC from the tail.
 //
 // If CRC matches, we've found the correct boundaries regardless of header state.
-func tryReconstructFromTail(datFile *os.File, tailOffset int64, storedCRC uint32, timestamp uint64, gap Gap, version int, fileSize int64) *NeedleRecord {
+func tryReconstructFromTail(datFile *os.File, tailOffset int64, storedCRC uint32, timestamp uint64, gap Gap, version int, fileSize int64, superBlockSize int) *NeedleRecord {
 	// tailOffset is where CRC starts, i.e. bodyEnd.
 	// Body layout: DataSize(4) + Data(DataSize) + Flags(1) + optional metadata
 	// bodySize = tailOffset - needleOffset - NeedleHeaderSize
@@ -119,7 +119,7 @@ func tryReconstructFromTail(datFile *os.File, tailOffset int64, storedCRC uint32
 	// needleOffset is aligned and check CRC.
 
 	// The maximum distance to search backwards
-	maxBacktrack := tailOffset - int64(SuperBlockSize)
+	maxBacktrack := tailOffset - int64(superBlockSize)
 	if maxBacktrack > int64(MaxReasonableNeedleSize) {
 		maxBacktrack = int64(MaxReasonableNeedleSize)
 	}
@@ -127,7 +127,7 @@ func tryReconstructFromTail(datFile *os.File, tailOffset int64, storedCRC uint32
 	// For each candidate bodySize, compute needleOffset and check CRC
 	for bodySize := int32(5); int64(bodySize)+NeedleHeaderSize <= maxBacktrack; bodySize++ {
 		needleOffset := tailOffset - int64(bodySize) - NeedleHeaderSize
-		if needleOffset < int64(SuperBlockSize) {
+		if needleOffset < int64(superBlockSize) {
 			break
 		}
 		if needleOffset%NeedlePaddingSize != 0 {
