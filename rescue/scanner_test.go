@@ -49,18 +49,24 @@ func buildNeedleV3(cookie uint32, needleId uint64, data []byte) []byte {
 }
 
 // buildDeletedNeedleV3 creates a deleted (tombstone) needle.
+// Uses Size=-1 (TombstoneFileSize) to match real SeaweedFS semantics.
 func buildDeletedNeedleV3(cookie uint32, needleId uint64) []byte {
 	header := make([]byte, NeedleHeaderSize)
 	binary.BigEndian.PutUint32(header[0:4], cookie)
 	binary.BigEndian.PutUint64(header[4:12], needleId)
-	// Size = 0 for deleted
-	binary.BigEndian.PutUint32(header[12:16], 0)
+	// Size = -1 (0xFFFFFFFF) for tombstone/deleted
+	binary.BigEndian.PutUint32(header[12:16], 0xFFFFFFFF)
+
+	// For deleted needles, body size = abs(Size) = 1
+	// Body is just 1 byte (the absolute value of -1)
+	body := make([]byte, 1)
 
 	tail := make([]byte, NeedleChecksumSize+TimestampSize)
 	binary.BigEndian.PutUint64(tail[4:12], 1700000000_000_000_000)
 
-	raw := append(header, tail...)
-	padLen := PaddingLength(0, 3)
+	raw := append(header, body...)
+	raw = append(raw, tail...)
+	padLen := PaddingLength(-1, 3)
 	if padLen > 0 {
 		raw = append(raw, make([]byte, padLen)...)
 	}

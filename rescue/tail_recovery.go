@@ -44,57 +44,63 @@ func RecoverFromTails(datFile *os.File, gaps []Gap, version int, superBlockSize 
 	var recovered []NeedleRecord
 	fileSize, _ := datFile.Seek(0, io.SeekEnd)
 
+	// Process gaps in chunks to limit memory usage (max 4MB per chunk).
+	// Overlap by MaxReasonableNeedleSize to handle needles crossing chunk boundaries.
+	const chunkSize = 4 * 1024 * 1024
+	tailSize := NeedleChecksumSize + TimestampSize
+
 	for gapIdx, gap := range gaps {
 		gapRecovered := 0
-
-		// Read the entire gap into memory for fast scanning.
-		// Corruption gaps are typically small (a few KB to MB).
 		gapSize := gap.Size()
-		if gapSize > 256*1024*1024 {
-			// Skip absurdly large gaps
-			if log != nil {
-				log("  tail-recovery: gap %d too large (%s), skipping", gapIdx+1, humanSize(gapSize))
+
+		if gapSize <= 0 {
+			continue
+		}
+
+		// Process this gap in chunks
+		for chunkStart := gap.StartOffset; chunkStart < gap.EndOffset; chunkStart += chunkSize {
+			chunkEnd := chunkStart + chunkSize
+			if chunkEnd > gap.EndOffset {
+				chunkEnd = gap.EndOffset
 			}
-			continue
-		}
+			readSize := chunkEnd - chunkStart
 
-		gapBuf := make([]byte, gapSize)
-		n, err := datFile.ReadAt(gapBuf, gap.StartOffset)
-		if err != nil && err != io.EOF {
-			continue
-		}
-		gapBuf = gapBuf[:n]
-
-		// Scan every byte offset for CRC(4)+Timestamp(8) pattern.
-		// The tail isn't necessarily 8-byte aligned (only needle START is aligned).
-		tailSize := NeedleChecksumSize + TimestampSize
-		for i := 0; i+tailSize <= len(gapBuf); i++ {
-			storedCRC := binary.BigEndian.Uint32(gapBuf[i : i+4])
-			timestamp := binary.BigEndian.Uint64(gapBuf[i+4 : i+12])
-
-			if !IsReasonableTimestamp(timestamp) || timestamp == 0 {
+			gapBuf := make([]byte, readSize)
+			n, err := datFile.ReadAt(gapBuf, chunkStart)
+			if err != nil && err != io.EOF {
 				continue
 			}
+			gapBuf = gapBuf[:n]
 
-			// Candidate tail found at absolute offset gap.StartOffset + i.
-			tailAbsOffset := gap.StartOffset + int64(i)
-			rec := tryReconstructFromTail(datFile, tailAbsOffset, storedCRC, timestamp, gap, version, fileSize, superBlockSize)
-			if rec != nil {
-				rec.Source = "tail-recovery"
-				rec.Status = StatusRecovered
-				recovered = append(recovered, *rec)
-				gapRecovered++
-				if log != nil {
-					log("  tail-recovery: found needle id=%d (dataSize=%d) at offset %d via tail at %d in gap %d",
-						rec.NeedleId, rec.DataSize, rec.Offset, tailAbsOffset, gapIdx+1)
+			// Scan every byte offset for CRC(4)+Timestamp(8) pattern.
+			for i := 0; i+tailSize <= len(gapBuf); i++ {
+				storedCRC := binary.BigEndian.Uint32(gapBuf[i : i+4])
+				timestamp := binary.BigEndian.Uint64(gapBuf[i+4 : i+12])
+
+				if !IsReasonableTimestamp(timestamp) || timestamp == 0 {
+					continue
 				}
-				// Skip past this needle's tail to avoid duplicate matches
-				i += tailSize - 1
+
+				// Candidate tail found at absolute offset chunkStart + i.
+				tailAbsOffset := chunkStart + int64(i)
+				rec := tryReconstructFromTail(datFile, tailAbsOffset, storedCRC, timestamp, gap, version, fileSize, superBlockSize)
+				if rec != nil {
+					rec.Source = "tail-recovery"
+					rec.Status = StatusRecovered
+					recovered = append(recovered, *rec)
+					gapRecovered++
+					if log != nil {
+						log("  tail-recovery: found needle id=%d (dataSize=%d) at offset %d via tail at %d in gap %d",
+							rec.NeedleId, rec.DataSize, rec.Offset, tailAbsOffset, gapIdx+1)
+					}
+					// Skip past this needle's tail to avoid duplicate matches
+					i += tailSize - 1
+				}
 			}
 		}
 
 		if gapRecovered == 0 && log != nil {
-			log("  tail-recovery: gap %d — no needles recovered via tail patterns", gapIdx+1)
+			log("  tail-recovery: gap %d (%s) — no needles recovered via tail patterns", gapIdx+1, humanSize(gapSize))
 		}
 	}
 
@@ -173,30 +179,33 @@ func tryReconstructFromTail(datFile *os.File, tailOffset int64, storedCRC uint32
 
 		// If header size doesn't match, the header was destroyed — use our computed bodySize
 		if headerSize != bodySize {
-			// Header is destroyed. We know the correct bodySize from CRC validation.
-			// NeedleId from header is garbage — mark as 0 so caller knows.
+			// Header is destroyed. We know the correct bodySize from CRC validation,
+			// but NeedleId/Cookie from header are garbage. Mark HeaderIntact=false
+			// so the extractor can exclude this from .idx (garbage NeedleId is dangerous).
 			return &NeedleRecord{
-				Offset:      needleOffset,
-				NeedleId:    needleId, // may be garbage if header is destroyed
-				Cookie:      cookie,   // may be garbage
-				Size:        bodySize,
-				DataSize:    dataSize,
-				StoredCRC:   storedCRC,
-				ComputedCRC: computedCRC,
-				Timestamp:   timestamp,
+				Offset:       needleOffset,
+				NeedleId:     needleId, // WARNING: may be garbage if header is destroyed
+				Cookie:       cookie,   // WARNING: may be garbage
+				Size:         bodySize,
+				DataSize:     dataSize,
+				StoredCRC:    storedCRC,
+				ComputedCRC:  computedCRC,
+				Timestamp:    timestamp,
+				HeaderIntact: false,
 			}
 		}
 
 		// Header is intact — great, we have reliable NeedleId
 		return &NeedleRecord{
-			Offset:      needleOffset,
-			NeedleId:    needleId,
-			Cookie:      cookie,
-			Size:        bodySize,
-			DataSize:    dataSize,
-			StoredCRC:   storedCRC,
-			ComputedCRC: computedCRC,
-			Timestamp:   timestamp,
+			Offset:       needleOffset,
+			NeedleId:     needleId,
+			Cookie:       cookie,
+			Size:         bodySize,
+			DataSize:     dataSize,
+			StoredCRC:    storedCRC,
+			ComputedCRC:  computedCRC,
+			Timestamp:    timestamp,
+			HeaderIntact: true,
 		}
 	}
 

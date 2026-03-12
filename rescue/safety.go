@@ -321,6 +321,19 @@ func ReplaceOriginal(originalDatPath, recoveredDatPath string, log Logger) error
 	return nil
 }
 
+// CheckInterruptedReplace checks if a previous replace operation was interrupted.
+// Returns a description of the state if found, or empty string if clean.
+func CheckInterruptedReplace(datPath string) string {
+	markerPath := datPath + ".rescue-replace-in-progress"
+	data, err := os.ReadFile(markerPath)
+	if err != nil {
+		return "" // no marker = clean
+	}
+	return fmt.Sprintf("WARNING: interrupted replace detected (marker: %s)\nContents:\n%s\n"+
+		"The previous rescue --replace was interrupted. Check .bak files and resolve manually.\n"+
+		"Remove %s after resolving.", markerPath, string(data), markerPath)
+}
+
 // PreFlightChecks validates that the environment is ready for a rescue operation.
 // Returns a list of issues. Empty list = all good.
 func PreFlightChecks(datPath string, extractPath string, force ...bool) []string {

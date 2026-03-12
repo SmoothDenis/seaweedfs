@@ -1,6 +1,9 @@
 package rescue
 
-import "fmt"
+import (
+	"fmt"
+	"math"
+)
 
 type NeedleStatus int
 
@@ -41,9 +44,10 @@ type NeedleRecord struct {
 	StoredCRC   uint32
 	ComputedCRC uint32
 	Timestamp   uint64 // AppendAtNs (V3 only)
-	Status      NeedleStatus
-	Source      string // "idx-guided", "sequential", "deep-scan"
-	IdxMatch    bool   // matches .idx entry
+	Status       NeedleStatus
+	Source       string // "idx-guided", "sequential", "deep-scan", "tail-recovery"
+	IdxMatch     bool   // matches .idx entry
+	HeaderIntact bool   // true if needle header was readable (NeedleId/Cookie are reliable)
 }
 
 // ActualDiskSize returns the total bytes this needle occupies on disk including header, body, tail, and padding.
@@ -132,7 +136,46 @@ func ActualDiskSize(size int32, version int) int64 {
 	return int64(NeedleHeaderSize) + absSize + NeedleChecksumSize + padding
 }
 
+// statusPriority returns a priority for NeedleStatus (higher = better).
+// Used for deduplication: when multiple records share a NeedleId, keep the best one.
+func statusPriority(s NeedleStatus) int {
+	switch s {
+	case StatusValid:
+		return 5
+	case StatusRepaired:
+		return 4
+	case StatusRecovered:
+		return 3
+	case StatusDeleted:
+		return 2
+	case StatusCorruptedData:
+		return 1
+	default:
+		return 0
+	}
+}
+
+// DeduplicateByNeedleId removes duplicate NeedleId entries, keeping the record
+// with the highest status priority. This prevents writing conflicting entries
+// to the .idx file and avoids wasting space with duplicate data in .dat.
+func DeduplicateByNeedleId(records []NeedleRecord) []NeedleRecord {
+	bestByID := make(map[uint64]NeedleRecord, len(records))
+	for _, rec := range records {
+		if existing, ok := bestByID[rec.NeedleId]; !ok || statusPriority(rec.Status) > statusPriority(existing.Status) {
+			bestByID[rec.NeedleId] = rec
+		}
+	}
+	deduped := make([]NeedleRecord, 0, len(bestByID))
+	for _, rec := range bestByID {
+		deduped = append(deduped, rec)
+	}
+	return deduped
+}
+
 func absInt32(v int32) int32 {
+	if v == math.MinInt32 {
+		return math.MaxInt32 // overflow guard; will be caught by IsReasonableSize
+	}
 	if v < 0 {
 		return -v
 	}

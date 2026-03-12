@@ -27,6 +27,11 @@ type VerifyResult struct {
 // against the original scan results to verify the operation only helped.
 // It performs both stat-level and needle-level (byte-for-byte CRC) verification.
 func VerifyOutput(outputDatPath string, originalResult *ScanResult, log Logger) (*VerifyResult, error) {
+	vr, _, err := verifyOutputInternal(outputDatPath, originalResult, log)
+	return vr, err
+}
+
+func verifyOutputInternal(outputDatPath string, originalResult *ScanResult, log Logger) (*VerifyResult, *ScanResult, error) {
 	if log != nil {
 		log("verify: re-scanning output volume %s...", outputDatPath)
 	}
@@ -35,7 +40,7 @@ func VerifyOutput(outputDatPath string, originalResult *ScanResult, log Logger) 
 	scanner.DeepScan = true
 	outputResult, err := scanner.Run()
 	if err != nil {
-		return nil, fmt.Errorf("verify scan failed: %w", err)
+		return nil, nil, fmt.Errorf("verify scan failed: %w", err)
 	}
 
 	vr := &VerifyResult{
@@ -71,7 +76,7 @@ func VerifyOutput(outputDatPath string, originalResult *ScanResult, log Logger) 
 	// Build summary
 	vr.Summary = buildVerifySummary(vr, origRecoverable, outRecoverable)
 
-	return vr, nil
+	return vr, outputResult, nil
 }
 
 // verifyNeedleContent does a needle-by-needle comparison.
@@ -303,37 +308,32 @@ func VerifyIdxConsistency(idxPath string, result *ScanResult) ([]string, error) 
 
 // VerifyExtractedVolume is a convenience that chains: re-scan output + needle comparison + idx check.
 func VerifyExtractedVolume(outputDatPath string, originalResult *ScanResult, log Logger) (*VerifyResult, []string, error) {
-	vr, err := VerifyOutput(outputDatPath, originalResult, log)
+	vr, outResult, err := verifyOutputInternal(outputDatPath, originalResult, log)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	// Also verify idx consistency
+	// Also verify idx consistency (reuse outResult to avoid scanning again)
 	idxPath := outputDatPath[:len(outputDatPath)-4] + ".idx"
 	if _, statErr := os.Stat(idxPath); statErr == nil {
 		if log != nil {
 			log("verify: checking idx consistency %s...", idxPath)
 		}
-		// Re-scan to get output records
-		scanner := NewScanner(outputDatPath)
-		outResult, err := scanner.Run()
-		if err == nil {
-			idxIssues, err := VerifyIdxConsistency(idxPath, outResult)
-			if err != nil {
-				if log != nil {
-					log("verify: idx check failed: %v", err)
+		idxIssues, err := VerifyIdxConsistency(idxPath, outResult)
+		if err != nil {
+			if log != nil {
+				log("verify: idx check failed: %v", err)
+			}
+		} else if len(idxIssues) > 0 {
+			if log != nil {
+				for _, issue := range idxIssues {
+					log("verify: idx issue: %s", issue)
 				}
-			} else if len(idxIssues) > 0 {
-				if log != nil {
-					for _, issue := range idxIssues {
-						log("verify: idx issue: %s", issue)
-					}
-				}
-				return vr, idxIssues, nil
-			} else {
-				if log != nil {
-					log("verify: idx is consistent with .dat")
-				}
+			}
+			return vr, idxIssues, nil
+		} else {
+			if log != nil {
+				log("verify: idx is consistent with .dat")
 			}
 		}
 	}

@@ -216,6 +216,16 @@ func RepairAndExtract(srcDatPath string, result *ScanResult, dstDatPath string, 
 		return 0, 0, fmt.Errorf("write superblock: %w", err)
 	}
 
+	// Pad to 8-byte alignment after superblock
+	sbSize := len(result.SuperBlockData)
+	if sbSize%NeedlePaddingSize != 0 {
+		padding := NeedlePaddingSize - (sbSize % NeedlePaddingSize)
+		if _, err := dst.Write(make([]byte, padding)); err != nil {
+			sw.Abort()
+			return 0, 0, fmt.Errorf("write superblock padding: %w", err)
+		}
+	}
+
 	validRecords := make([]NeedleRecord, 0, len(result.Records))
 	for _, rec := range result.Records {
 		switch rec.Status {
@@ -223,6 +233,7 @@ func RepairAndExtract(srcDatPath string, result *ScanResult, dstDatPath string, 
 			validRecords = append(validRecords, rec)
 		}
 	}
+	validRecords = DeduplicateByNeedleId(validRecords)
 	sort.Slice(validRecords, func(i, j int) bool {
 		return validRecords[i].Offset < validRecords[j].Offset
 	})
@@ -265,11 +276,14 @@ func RepairAndExtract(srcDatPath string, result *ScanResult, dstDatPath string, 
 			return written, repairedCount, fmt.Errorf("write needle: %w", err)
 		}
 
-		idxEntries = append(idxEntries, idxWriteEntry{
-			needleId: rec.NeedleId,
-			offset:   newOffset,
-			size:     rec.Size,
-		})
+		// Only add to .idx if the header was intact (NeedleId is reliable)
+		if rec.HeaderIntact {
+			idxEntries = append(idxEntries, idxWriteEntry{
+				needleId: rec.NeedleId,
+				offset:   newOffset,
+				size:     rec.Size,
+			})
+		}
 		written++
 	}
 

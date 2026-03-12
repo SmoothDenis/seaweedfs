@@ -25,11 +25,14 @@ func RebuildIdx(datPath string, result *ScanResult) (int, error) {
 
 	var idxEntries []idxWriteEntry
 	for _, rec := range validRecords {
-		idxEntries = append(idxEntries, idxWriteEntry{
-			needleId: rec.NeedleId,
-			offset:   rec.Offset,
-			size:     rec.Size,
-		})
+		// Only index needles with intact headers (reliable NeedleId)
+		if rec.HeaderIntact {
+			idxEntries = append(idxEntries, idxWriteEntry{
+				needleId: rec.NeedleId,
+				offset:   rec.Offset,
+				size:     rec.Size,
+			})
+		}
 	}
 
 	idxPath := datPath[:len(datPath)-4] + ".idx"
@@ -68,7 +71,18 @@ func ExtractValidNeedles(srcDatPath string, result *ScanResult, dstDatPath strin
 		return 0, fmt.Errorf("write superblock: %w", err)
 	}
 
-	// Sort records by offset for sequential reading
+	// Pad to 8-byte alignment after superblock.
+	// The .idx stores offset/8, so misaligned offsets get truncated and cause data loss.
+	sbSize := len(result.SuperBlockData)
+	if sbSize%NeedlePaddingSize != 0 {
+		padding := NeedlePaddingSize - (sbSize % NeedlePaddingSize)
+		if _, err := dst.Write(make([]byte, padding)); err != nil {
+			sw.Abort()
+			return 0, fmt.Errorf("write superblock padding: %w", err)
+		}
+	}
+
+	// Collect extractable records, deduplicate by NeedleId, sort by offset
 	validRecords := make([]NeedleRecord, 0, len(result.Records))
 	for _, rec := range result.Records {
 		switch rec.Status {
@@ -80,6 +94,7 @@ func ExtractValidNeedles(srcDatPath string, result *ScanResult, dstDatPath strin
 			}
 		}
 	}
+	validRecords = DeduplicateByNeedleId(validRecords)
 	sort.Slice(validRecords, func(i, j int) bool {
 		return validRecords[i].Offset < validRecords[j].Offset
 	})
@@ -114,11 +129,16 @@ func ExtractValidNeedles(srcDatPath string, result *ScanResult, dstDatPath strin
 			return written, fmt.Errorf("write needle: %w", err)
 		}
 
-		idxEntries = append(idxEntries, idxWriteEntry{
-			needleId: rec.NeedleId,
-			offset:   newOffset,
-			size:     rec.Size,
-		})
+		// Only add to .idx if the header was intact (NeedleId is reliable).
+		// Needles with destroyed headers (from tail recovery) are still
+		// extracted to .dat for data preservation, but not indexed.
+		if rec.HeaderIntact {
+			idxEntries = append(idxEntries, idxWriteEntry{
+				needleId: rec.NeedleId,
+				offset:   newOffset,
+				size:     rec.Size,
+			})
+		}
 		written++
 	}
 

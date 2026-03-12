@@ -3,6 +3,7 @@ package rescue
 import (
 	"encoding/binary"
 	"hash/crc32"
+	"math"
 )
 
 var crc32cTable = crc32.MakeTable(crc32.Castagnoli)
@@ -23,12 +24,15 @@ func ParseNeedleHeader(header []byte) (cookie uint32, needleId uint64, size int3
 // IsReasonableSize checks if a Size value could plausibly be a real needle.
 func IsReasonableSize(size int32) bool {
 	if size == 0 {
-		return true // deleted needle with zero size
+		return true // valid empty needle (not deleted per SeaweedFS semantics)
+	}
+	if size == -1 { // TombstoneFileSize
+		return true
 	}
 	abs := size
 	if abs < 0 {
-		if abs == -1 { // TombstoneFileSize (0xFFFFFFFF as int32)
-			return true
+		if abs == math.MinInt32 {
+			return false // overflow guard
 		}
 		abs = -abs
 	}
@@ -61,14 +65,48 @@ func ValidateNeedleAtOffset(data []byte, offset int64, version int) (NeedleRecor
 		return rec, false
 	}
 
-	// Deleted needle
-	if rec.Size <= 0 {
+	// Deleted needle (Size < 0 is tombstone)
+	if rec.Size < 0 {
 		// Sanity: NeedleId must be nonzero and not all-ones (garbage pattern)
 		if rec.NeedleId == 0 || rec.NeedleId == 0xFFFFFFFFFFFFFFFF {
 			rec.Status = StatusCorruptedHeader
 			return rec, false
 		}
+		rec.HeaderIntact = true
 		rec.Status = StatusDeleted
+		return rec, true
+	}
+
+	// Zero-size needle (valid in V2/V3, not deleted per SeaweedFS semantics)
+	if rec.Size == 0 {
+		if rec.NeedleId == 0 || rec.NeedleId == 0xFFFFFFFFFFFFFFFF {
+			rec.Status = StatusCorruptedHeader
+			return rec, false
+		}
+		// Validate the CRC in the tail: CRC32C of empty data is always 0.
+		// This filters out false positives from garbage data.
+		crcOffset := NeedleHeaderSize
+		if len(data) >= crcOffset+NeedleChecksumSize {
+			storedCRC := binary.BigEndian.Uint32(data[crcOffset : crcOffset+NeedleChecksumSize])
+			if storedCRC != 0 {
+				rec.Status = StatusCorruptedHeader
+				return rec, false
+			}
+		}
+		// For V3, also validate the timestamp to further reduce false positives.
+		if version == 3 {
+			tsOffset := NeedleHeaderSize + NeedleChecksumSize
+			if len(data) >= tsOffset+TimestampSize {
+				ts := binary.BigEndian.Uint64(data[tsOffset : tsOffset+TimestampSize])
+				rec.Timestamp = ts
+				if ts != 0 && !IsReasonableTimestamp(ts) {
+					rec.Status = StatusCorruptedHeader
+					return rec, false
+				}
+			}
+		}
+		rec.HeaderIntact = true
+		rec.Status = StatusValid
 		return rec, true
 	}
 
@@ -115,6 +153,8 @@ func ValidateNeedleAtOffset(data []byte, offset int64, version int) (NeedleRecor
 	if version == 3 && len(data) >= bodyEnd+NeedleChecksumSize+TimestampSize {
 		rec.Timestamp = binary.BigEndian.Uint64(data[bodyEnd+NeedleChecksumSize : bodyEnd+NeedleChecksumSize+TimestampSize])
 	}
+
+	rec.HeaderIntact = true
 
 	if rec.ComputedCRC == rec.StoredCRC {
 		rec.Status = StatusValid

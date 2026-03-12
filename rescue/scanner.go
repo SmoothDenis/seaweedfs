@@ -191,7 +191,7 @@ func (s *Scanner) phase1IdxGuided(result *ScanResult) {
 			result.Stats.IdxMismatches++
 		}
 	}
-	// Phase 1 results are used as anchors in phase 2, not added to records directly
+	// Phase 1 validates idx entries but does not add records (phase 2 handles record collection)
 }
 
 func (s *Scanner) phase2Sequential(result *ScanResult) {
@@ -235,7 +235,7 @@ func (s *Scanner) phase2Sequential(result *ScanResult) {
 
 		for scanOffset < s.datSize {
 			candidate := s.validateAtOffset(scanOffset)
-			if candidate != nil && candidate.Status == StatusValid {
+			if candidate != nil && (candidate.Status == StatusValid || candidate.Status == StatusDeleted) {
 				// Found next valid needle
 				gap := Gap{StartOffset: gapStart, EndOffset: scanOffset}
 				result.CorruptionGaps = append(result.CorruptionGaps, gap)
