@@ -89,7 +89,7 @@ func RecoverFromTails(datFile *os.File, gaps []Gap, version int, superBlockSize 
 				}
 
 				candidateCount++
-				if log != nil && candidateCount%100 == 0 {
+				if log != nil && candidateCount%10000 == 0 {
 					log("  tail-recovery: gap %d — checked %d tail candidates so far (offset %d)...",
 						gapIdx+1, candidateCount, chunkStart+int64(i))
 				}
