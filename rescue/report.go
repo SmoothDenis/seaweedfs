@@ -27,6 +27,18 @@ func PrintReport(w io.Writer, result *ScanResult, verbose bool, signatures ...[]
 		fmt.Fprintf(w, "IDX entries:      %d active + %d tombstoned\n", result.Stats.IdxActive, result.Stats.IdxTombstoned)
 		fmt.Fprintf(w, "Confirmed in dat: %d active needles matched\n", result.Stats.IdxConfirmed)
 		fmt.Fprintf(w, "Orphaned in idx:  %d (idx points to missing data)\n", result.Stats.IdxOrphaned)
+
+		// Warn about .dat/.idx size mismatch: needles in .dat not tracked by .idx
+		datNeedleCount := result.Stats.ValidNeedles + result.Stats.DeletedNeedles
+		idxTotal := result.Stats.IdxActive + result.Stats.IdxTombstoned
+		if datNeedleCount > idxTotal {
+			untracked := datNeedleCount - idxTotal
+			fmt.Fprintf(w, "\nWARNING: .dat contains %d data-bearing needles but .idx only has %d entries.\n", datNeedleCount, idxTotal)
+			fmt.Fprintf(w, "         %d needles in .dat are NOT tracked by .idx.\n", untracked)
+			fmt.Fprintf(w, "         The volume server will report a file size mismatch (volumeDataIntegrityChecking).\n")
+			fmt.Fprintf(w, "         This typically happens when .dat and .idx have different compact_revision.\n")
+			fmt.Fprintf(w, "         Fix: rebuild .idx from .dat with: weed-rescue --rebuildIdx %s\n", result.datPath)
+		}
 	}
 
 	// List corrupted needles by ID (always, not just verbose)
@@ -93,8 +105,12 @@ func PrintReport(w io.Writer, result *ScanResult, verbose bool, signatures ...[]
 			fmt.Fprintf(w, "Volume is healthy: %d data-bearing needles (%d active, %d deleted), %d deletion markers (Size=0), no corruption.\n",
 				dataBearing, result.Stats.ValidNeedles, result.Stats.DeletedNeedles, result.Stats.DeletionMarkers)
 		}
-		if hasIdxStats && result.Stats.IdxOrphaned == 0 {
+		idxDatMismatch := hasIdxStats && (result.Stats.ValidNeedles+result.Stats.DeletedNeedles) > (result.Stats.IdxActive+result.Stats.IdxTombstoned)
+		if hasIdxStats && result.Stats.IdxOrphaned == 0 && !idxDatMismatch {
 			fmt.Fprintf(w, "\nVolume is healthy. IDX cross-reference shows no orphaned entries and no corruption.\n")
+		} else if idxDatMismatch {
+			fmt.Fprintf(w, "\nVolume data is intact but .idx is incomplete — volume server will reject this volume.\n")
+			fmt.Fprintf(w, "Run: weed-rescue --rebuildIdx %s\n", result.datPath)
 		}
 	} else {
 		if hasIdxStats {
