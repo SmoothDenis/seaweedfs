@@ -53,12 +53,12 @@ func TestScanDeletedNeedleAfterCorruption(t *testing.T) {
 	}
 }
 
-// TestScanZeroSizeNeedle verifies that Size=0 needles are treated as valid,
-// not deleted (matching real SeaweedFS semantics).
+// TestScanZeroSizeNeedle verifies that Size=0 needles are treated as deletion markers.
+// In SeaweedFS, when a needle is deleted, a new entry with Size=0 is appended to .dat.
 func TestScanZeroSizeNeedle(t *testing.T) {
 	dir := t.TempDir()
 
-	// Build a zero-size needle manually
+	// Build a zero-size needle manually (deletion marker)
 	header := make([]byte, NeedleHeaderSize)
 	binary.BigEndian.PutUint32(header[0:4], 0x12345678)
 	binary.BigEndian.PutUint64(header[4:12], 42)
@@ -81,11 +81,14 @@ func TestScanZeroSizeNeedle(t *testing.T) {
 		t.Fatalf("scan failed: %v", err)
 	}
 
-	if result.Stats.ValidNeedles != 1 {
-		t.Errorf("expected 1 valid needle (size=0), got %d valid", result.Stats.ValidNeedles)
+	if result.Stats.DeletionMarkers != 1 {
+		t.Errorf("expected 1 deletion marker (size=0), got %d", result.Stats.DeletionMarkers)
+	}
+	if result.Stats.ValidNeedles != 0 {
+		t.Errorf("size=0 needle should not be counted as valid, got %d valid", result.Stats.ValidNeedles)
 	}
 	if result.Stats.DeletedNeedles != 0 {
-		t.Errorf("size=0 needle should not be counted as deleted, got %d deleted", result.Stats.DeletedNeedles)
+		t.Errorf("size=0 needle should not be counted as deleted (Size<0), got %d deleted", result.Stats.DeletedNeedles)
 	}
 }
 

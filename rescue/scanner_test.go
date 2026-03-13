@@ -73,6 +73,28 @@ func buildDeletedNeedleV3(cookie uint32, needleId uint64) []byte {
 	return raw
 }
 
+// buildDeletionMarkerV3 creates a Size=0 deletion marker as SeaweedFS writes when deleting a needle.
+// CRC of empty data = 0, timestamp is set to a reasonable value.
+func buildDeletionMarkerV3(cookie uint32, needleId uint64) []byte {
+	header := make([]byte, NeedleHeaderSize)
+	binary.BigEndian.PutUint32(header[0:4], cookie)
+	binary.BigEndian.PutUint64(header[4:12], needleId)
+	// Size = 0 (deletion marker)
+	binary.BigEndian.PutUint32(header[12:16], 0)
+
+	// CRC of empty data = 0
+	tail := make([]byte, NeedleChecksumSize+TimestampSize)
+	binary.BigEndian.PutUint32(tail[0:4], 0) // CRC = 0
+	binary.BigEndian.PutUint64(tail[4:12], 1700000000_000_000_000)
+
+	raw := append(header, tail...)
+	padLen := PaddingLength(0, 3)
+	if padLen > 0 {
+		raw = append(raw, make([]byte, padLen)...)
+	}
+	return raw
+}
+
 // buildSuperBlock returns an 8-byte V3 superblock.
 func buildSuperBlock() []byte {
 	sb := make([]byte, SuperBlockSize)
@@ -1044,5 +1066,186 @@ func TestActualDiskSize(t *testing.T) {
 	dsV2_4 := ActualDiskSize(4, 2)
 	if dsV2_4 != 32 {
 		t.Errorf("expected 32 for V2 size=4, got %d", dsV2_4)
+	}
+}
+
+// --- Deletion marker tests ---
+
+func TestScanDeletionMarker(t *testing.T) {
+	dir := t.TempDir()
+	n1 := buildNeedleV3(0x11111111, 1, []byte("hello"))
+	dm := buildDeletionMarkerV3(0x11111111, 1) // deletion marker for same NeedleId
+	n2 := buildNeedleV3(0x22222222, 2, []byte("world"))
+
+	datPath := writeDatFile(t, dir, n1, dm, n2)
+
+	scanner := NewScanner(datPath)
+	result, err := scanner.Run()
+	if err != nil {
+		t.Fatalf("scan failed: %v", err)
+	}
+
+	if result.Stats.TotalNeedles != 3 {
+		t.Errorf("expected 3 total needles, got %d", result.Stats.TotalNeedles)
+	}
+	if result.Stats.ValidNeedles != 2 {
+		t.Errorf("expected 2 valid needles, got %d", result.Stats.ValidNeedles)
+	}
+	if result.Stats.DeletionMarkers != 1 {
+		t.Errorf("expected 1 deletion marker, got %d", result.Stats.DeletionMarkers)
+	}
+
+	// Verify the deletion marker has the correct status
+	foundMarker := false
+	for _, rec := range result.Records {
+		if rec.Status == StatusDeletionMarker {
+			foundMarker = true
+			if rec.Size != 0 {
+				t.Errorf("deletion marker should have Size=0, got %d", rec.Size)
+			}
+		}
+	}
+	if !foundMarker {
+		t.Error("deletion marker not found in records")
+	}
+}
+
+func TestScanMixedDeletedAndMarkers(t *testing.T) {
+	dir := t.TempDir()
+	n1 := buildNeedleV3(0x11111111, 1, []byte("data"))
+	dm := buildDeletionMarkerV3(0x22222222, 2)  // Size=0 deletion marker
+	del := buildDeletedNeedleV3(0x33333333, 3)   // Size=-1 tombstone
+	n2 := buildNeedleV3(0x44444444, 4, []byte("more data"))
+
+	datPath := writeDatFile(t, dir, n1, dm, del, n2)
+
+	scanner := NewScanner(datPath)
+	result, err := scanner.Run()
+	if err != nil {
+		t.Fatalf("scan failed: %v", err)
+	}
+
+	if result.Stats.TotalNeedles != 4 {
+		t.Errorf("expected 4 total needles, got %d", result.Stats.TotalNeedles)
+	}
+	if result.Stats.ValidNeedles != 2 {
+		t.Errorf("expected 2 valid, got %d", result.Stats.ValidNeedles)
+	}
+	if result.Stats.DeletionMarkers != 1 {
+		t.Errorf("expected 1 deletion marker, got %d", result.Stats.DeletionMarkers)
+	}
+	if result.Stats.DeletedNeedles != 1 {
+		t.Errorf("expected 1 deleted (Size<0), got %d", result.Stats.DeletedNeedles)
+	}
+}
+
+func TestExtractSkipsDeletionMarkers(t *testing.T) {
+	dir := t.TempDir()
+	n1 := buildNeedleV3(0x11111111, 1, []byte("keep this"))
+	dm := buildDeletionMarkerV3(0x11111111, 1) // deletion marker
+	n2 := buildNeedleV3(0x22222222, 2, []byte("keep this too"))
+
+	datPath := writeDatFile(t, dir, n1, dm, n2)
+
+	scanner := NewScanner(datPath)
+	result, err := scanner.Run()
+	if err != nil {
+		t.Fatalf("scan failed: %v", err)
+	}
+
+	// Extract
+	outPath := filepath.Join(dir, "out.dat")
+	count, err := ExtractValidNeedles(datPath, result, outPath)
+	if err != nil {
+		t.Fatalf("extract failed: %v", err)
+	}
+
+	// Should extract 2 valid needles, NOT the deletion marker
+	// But dedup means only 1 per NeedleId, so needleId=1 valid wins over marker
+	if count != 2 {
+		t.Errorf("expected 2 extracted needles, got %d", count)
+	}
+
+	// Scan the output — should have no deletion markers
+	outScanner := NewScanner(outPath)
+	outResult, err := outScanner.Run()
+	if err != nil {
+		t.Fatalf("output scan failed: %v", err)
+	}
+	if outResult.Stats.DeletionMarkers != 0 {
+		t.Errorf("output should have 0 deletion markers, got %d", outResult.Stats.DeletionMarkers)
+	}
+	if outResult.Stats.ValidNeedles != 2 {
+		t.Errorf("output should have 2 valid needles, got %d", outResult.Stats.ValidNeedles)
+	}
+}
+
+func TestStatsWithIdx(t *testing.T) {
+	dir := t.TempDir()
+
+	n1 := buildNeedleV3(0x11111111, 100, []byte("active file"))
+	n2 := buildNeedleV3(0x22222222, 200, []byte("will be deleted"))
+	dm := buildDeletionMarkerV3(0x22222222, 200) // deletion marker for n2
+	n3 := buildNeedleV3(0x33333333, 300, []byte("another active"))
+
+	datPath := writeDatFile(t, dir, n1, n2, dm, n3)
+
+	// Build idx: n1 active, n2 tombstoned (points to dm offset), n3 active
+	n1Offset := int64(SuperBlockSize)
+	n1DiskSize := ActualDiskSize(int32(4+len("active file")+1), 3)
+	n2Offset := n1Offset + n1DiskSize
+	n2DiskSize := ActualDiskSize(int32(4+len("will be deleted")+1), 3)
+	dmOffset := n2Offset + n2DiskSize
+	dmDiskSize := ActualDiskSize(0, 3)
+	n3Offset := dmOffset + dmDiskSize
+
+	idxPath := writeIdxFile(t, dir, []IdxEntry{
+		{NeedleId: 100, Offset: n1Offset, Size: int32(4 + len("active file") + 1)},
+		{NeedleId: 200, Offset: dmOffset, Size: -1}, // tombstone pointing to deletion marker
+		{NeedleId: 300, Offset: n3Offset, Size: int32(4 + len("another active") + 1)},
+	})
+
+	scanner := NewScanner(datPath)
+	scanner.IdxPath = idxPath
+	result, err := scanner.Run()
+	if err != nil {
+		t.Fatalf("scan failed: %v", err)
+	}
+
+	if result.Stats.IdxActive != 2 {
+		t.Errorf("expected 2 active idx entries, got %d", result.Stats.IdxActive)
+	}
+	if result.Stats.IdxTombstoned != 1 {
+		t.Errorf("expected 1 tombstoned idx entry, got %d", result.Stats.IdxTombstoned)
+	}
+	if result.Stats.DeletionMarkers != 1 {
+		t.Errorf("expected 1 deletion marker, got %d", result.Stats.DeletionMarkers)
+	}
+	if result.Stats.ValidNeedles != 3 {
+		t.Errorf("expected 3 valid needles (n1, n2 original, n3), got %d", result.Stats.ValidNeedles)
+	}
+}
+
+func TestDeduplicateWithDeletionMarker(t *testing.T) {
+	// When same NeedleId has both Valid and DeletionMarker records,
+	// Valid should win because it has higher priority
+	records := []NeedleRecord{
+		{NeedleId: 1, Status: StatusDeletionMarker, Size: 0, Offset: 100},
+		{NeedleId: 1, Status: StatusValid, Size: 10, Offset: 8},
+		{NeedleId: 2, Status: StatusValid, Size: 20, Offset: 50},
+	}
+	deduped := DeduplicateByNeedleId(records)
+	if len(deduped) != 2 {
+		t.Fatalf("expected 2 deduped records, got %d", len(deduped))
+	}
+	for _, rec := range deduped {
+		if rec.NeedleId == 1 {
+			if rec.Status != StatusValid {
+				t.Errorf("NeedleId=1 should be Valid after dedup, got %s", rec.Status)
+			}
+			if rec.Size != 10 {
+				t.Errorf("NeedleId=1 should have Size=10, got %d", rec.Size)
+			}
+		}
 	}
 }

@@ -77,7 +77,9 @@ func ValidateNeedleAtOffset(data []byte, offset int64, version int) (NeedleRecor
 		return rec, true
 	}
 
-	// Zero-size needle (valid in V2/V3, not deleted per SeaweedFS semantics)
+	// Size=0: deletion marker in .dat file.
+	// When SeaweedFS deletes a needle, it appends a new entry with Size=0 and empty data.
+	// The .idx gets Size=-1 (tombstone). The original data needle remains intact.
 	if rec.Size == 0 {
 		if rec.NeedleId == 0 || rec.NeedleId == 0xFFFFFFFFFFFFFFFF {
 			rec.Status = StatusCorruptedHeader
@@ -106,7 +108,7 @@ func ValidateNeedleAtOffset(data []byte, offset int64, version int) (NeedleRecor
 			}
 		}
 		rec.HeaderIntact = true
-		rec.Status = StatusValid
+		rec.Status = StatusDeletionMarker
 		return rec, true
 	}
 

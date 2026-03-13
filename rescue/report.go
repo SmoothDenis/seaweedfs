@@ -14,6 +14,7 @@ func PrintReport(w io.Writer, result *ScanResult, verbose bool, signatures ...[]
 	fmt.Fprintf(w, "Total needles:   %d\n", result.Stats.TotalNeedles)
 	fmt.Fprintf(w, "  Valid:          %d\n", result.Stats.ValidNeedles)
 	fmt.Fprintf(w, "  Deleted:        %d\n", result.Stats.DeletedNeedles)
+	fmt.Fprintf(w, "  Deletion markers: %d\n", result.Stats.DeletionMarkers)
 	fmt.Fprintf(w, "  Corrupted data: %d\n", result.Stats.CorruptedData)
 	fmt.Fprintf(w, "  Corrupted hdr:  %d\n", result.Stats.CorruptedHeader)
 	fmt.Fprintf(w, "  Recovered:      %d\n", result.Stats.Recovered)
@@ -21,11 +22,11 @@ func PrintReport(w io.Writer, result *ScanResult, verbose bool, signatures ...[]
 		fmt.Fprintf(w, "  Repaired:       %d\n", result.Stats.Repaired)
 	}
 
-	if result.Stats.IdxEntries > 0 {
+	if result.Stats.IdxActive > 0 || result.Stats.IdxTombstoned > 0 {
 		fmt.Fprintf(w, "\n--- IDX Cross-Reference ---\n")
-		fmt.Fprintf(w, "IDX entries:     %d\n", result.Stats.IdxEntries)
-		fmt.Fprintf(w, "  Matches:       %d\n", result.Stats.IdxMatches)
-		fmt.Fprintf(w, "  Mismatches:    %d\n", result.Stats.IdxMismatches)
+		fmt.Fprintf(w, "IDX entries:      %d active + %d tombstoned\n", result.Stats.IdxActive, result.Stats.IdxTombstoned)
+		fmt.Fprintf(w, "Confirmed in dat: %d active needles matched\n", result.Stats.IdxConfirmed)
+		fmt.Fprintf(w, "Orphaned in idx:  %d (idx points to missing data)\n", result.Stats.IdxOrphaned)
 	}
 
 	// List corrupted needles by ID (always, not just verbose)
@@ -78,19 +79,35 @@ func PrintReport(w io.Writer, result *ScanResult, verbose bool, signatures ...[]
 	fmt.Fprintf(w, "\n--- Summary ---\n")
 	recoverable := result.Stats.ValidNeedles + result.Stats.Recovered
 	lost := result.Stats.CorruptedData + result.Stats.CorruptedHeader
+	// Data-bearing needles exclude deletion markers (Size=0)
+	dataBearing := recoverable + result.Stats.DeletedNeedles + lost
 	totalUseful := recoverable + result.Stats.DeletedNeedles
 
+	hasIdxStats := result.Stats.IdxActive > 0 || result.Stats.IdxTombstoned > 0
+
 	if lost == 0 && len(result.CorruptionGaps) == 0 {
-		fmt.Fprintf(w, "Volume is healthy: %d needles (%d active, %d deleted), no corruption.\n",
-			result.Stats.TotalNeedles, result.Stats.ValidNeedles, result.Stats.DeletedNeedles)
+		if hasIdxStats {
+			fmt.Fprintf(w, "Active data: %d needles, %d deletion markers (Size=0), %d corrupted\n",
+				result.Stats.ValidNeedles, result.Stats.DeletionMarkers, result.Stats.CorruptedData)
+		} else {
+			fmt.Fprintf(w, "Volume is healthy: %d data-bearing needles (%d active, %d deleted), %d deletion markers (Size=0), no corruption.\n",
+				dataBearing, result.Stats.ValidNeedles, result.Stats.DeletedNeedles, result.Stats.DeletionMarkers)
+		}
+		if hasIdxStats && result.Stats.IdxOrphaned == 0 {
+			fmt.Fprintf(w, "\nVolume is healthy. IDX cross-reference shows no orphaned entries and no corruption.\n")
+		}
 	} else {
+		if hasIdxStats {
+			fmt.Fprintf(w, "Active data: %d needles, %d deletion markers (Size=0), %d corrupted\n",
+				result.Stats.ValidNeedles, result.Stats.DeletionMarkers, result.Stats.CorruptedData+result.Stats.CorruptedHeader)
+		}
 		fmt.Fprintf(w, "Recoverable:     %d needles (%d valid + %d deep-scan recovered)\n", recoverable, result.Stats.ValidNeedles, result.Stats.Recovered)
 		if result.Stats.Recovered > 0 {
 			fmt.Fprintf(w, "Recovered bytes: %s\n", humanSize(result.Stats.BytesRecovered))
 		}
 		fmt.Fprintf(w, "Lost:            %d needles (%d corrupted data, %d corrupted header)\n", lost, result.Stats.CorruptedData, result.Stats.CorruptedHeader)
-		if result.Stats.TotalNeedles > 0 {
-			pct := float64(recoverable) / float64(recoverable+lost) * 100
+		if dataBearing > 0 {
+			pct := float64(recoverable) / float64(dataBearing) * 100
 			fmt.Fprintf(w, "Recovery rate:   %.1f%%\n", pct)
 		}
 		fmt.Fprintf(w, "\nRecommended actions:\n")

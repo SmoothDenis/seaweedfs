@@ -11,7 +11,9 @@ Standalone tool for scanning, diagnosing, and recovering corrupted SeaweedFS vol
 - **Backup before modify** — `--backup-dir` copies originals before any operation
 - **Verification** — re-scans output and compares needle-by-needle with the original
 - **Safe replacement** — `--replace` only works after `--verify` passes all checks
-- **IDX cross-reference** — uses `.idx` file to improve scan accuracy
+- **IDX auto-detection** — automatically finds `.idx` next to `.dat` (use `--no-idx` to disable)
+- **IDX cross-reference** — uses `.idx` to show active vs tombstoned needles, confirm data integrity
+- **Deletion marker detection** — correctly identifies Size=0 entries as deletion markers (not active data)
 - **IDX rebuild** — reconstructs `.idx` from needles found in `.dat`
 - **JSON output** — machine-readable output for scripting and monitoring
 - **File lock** — prevents concurrent rescue operations on the same volume
@@ -103,6 +105,39 @@ weed-rescue \
 
 Same as #2, but also replaces the original files if verification passes. `--force` skips the confirmation prompt.
 
+## Understanding the Output
+
+### Needle types in the report
+
+| Type | Size field | Meaning |
+|------|-----------|---------|
+| **Valid** | > 0 | Active needle with intact data and valid CRC |
+| **Deletion marker** | = 0 | Written when SeaweedFS deletes a needle (no data, just a marker) |
+| **Deleted** | < 0 | Tombstone entry (Size=-1) — rare in `.dat`, more common in `.idx` |
+| **Corrupted data** | > 0 | Header readable but CRC mismatch (data damaged) |
+| **Recovered** | > 0 | Found via deep scan in a corruption gap |
+
+### Why scanner counts differ from master
+
+The SeaweedFS master reports `file_count` (unique active NeedleIds) and `delete_count` (tombstoned NeedleIds). The scanner counts **all physical entries** in the `.dat` file, which includes:
+
+- **Original data** for deleted needles (still intact in `.dat`, Size > 0)
+- **Deletion markers** (Size=0 entries appended when needles are deleted)
+- **Old versions** of updated needles (superseded but still physically present)
+
+When `--idx` is provided (or auto-detected), the report shows an **IDX Cross-Reference** section that maps scanner results to the master's view:
+
+```
+--- IDX Cross-Reference ---
+IDX entries:      379,945 active + 47 tombstoned
+Confirmed in dat: 379,945 active needles matched
+Orphaned in idx:  0 (idx points to missing data)
+```
+
+### IDX auto-detection
+
+The tool automatically uses the `.idx` file next to the `.dat` file if it exists. For example, `weed-rescue /data/vol_5580.dat` will auto-detect `/data/vol_5580.idx`. Use `--no-idx` to disable this.
+
 ## Usage Reference
 
 ```
@@ -113,7 +148,8 @@ weed-rescue [flags] <volume.dat>
 
 | Flag | Description |
 |---|---|
-| `--idx <path>` | Path to `.idx` file for cross-referencing (improves accuracy) |
+| `--idx <path>` | Path to `.idx` file for cross-referencing (default: auto-detected next to `.dat`) |
+| `--no-idx` | Disable automatic `.idx` detection (scan `.dat` only) |
 | `--version <2\|3>` | Force needle version (default: auto-detect from superblock) |
 | `--deep` | Enable deep scan + tail-pattern recovery (slower, better recovery) |
 | `--repair` | Attempt single-byte CRC repair on corrupted needles |

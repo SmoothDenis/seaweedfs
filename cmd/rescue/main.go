@@ -15,7 +15,8 @@ const version = "1.0.0"
 
 func main() {
 	// --- Flags ---
-	idxPath := flag.String("idx", "", "path to .idx file for cross-referencing (improves recovery accuracy)")
+	idxPath := flag.String("idx", "", "path to .idx file for cross-referencing (default: auto-detect next to .dat)")
+	noIdx := flag.Bool("no-idx", false, "disable automatic .idx detection (scan .dat only, no cross-reference)")
 	needleVersion := flag.Int("version", 0, "needle version: 2 or 3 (default: auto-detect from superblock)")
 	rebuildIdx := flag.Bool("rebuildIdx", false, "rebuild .idx file from scan results (overwrites existing .idx)")
 	extractPath := flag.String("extract", "", "extract valid needles to a new clean .dat + .idx at this path")
@@ -156,6 +157,17 @@ BUILD
 	}
 
 	datPath := flag.Arg(0)
+
+	// --- Auto-detect .idx file ---
+	if *idxPath == "" && !*noIdx && len(datPath) > 4 && datPath[len(datPath)-4:] == ".dat" {
+		candidate := datPath[:len(datPath)-4] + ".idx"
+		if _, err := os.Stat(candidate); err == nil {
+			*idxPath = candidate
+			if !*quiet {
+				fmt.Fprintf(os.Stderr, "Auto-detected .idx: %s (use --no-idx to disable)\n", candidate)
+			}
+		}
+	}
 
 	// --- Flag validation ---
 	var errors []string

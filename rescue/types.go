@@ -8,12 +8,13 @@ import (
 type NeedleStatus int
 
 const (
-	StatusValid         NeedleStatus = iota // Header OK, CRC OK
-	StatusCorruptedData                     // Header OK, CRC mismatch
-	StatusCorruptedHeader                   // Header unreadable / invalid size
-	StatusRecovered                         // Found via deep scan
-	StatusDeleted                           // Size < 0 (tombstone)
-	StatusRepaired                          // CRC mismatch fixed by single-byte repair
+	StatusValid           NeedleStatus = iota // Header OK, CRC OK
+	StatusCorruptedData                       // Header OK, CRC mismatch
+	StatusCorruptedHeader                     // Header unreadable / invalid size
+	StatusRecovered                           // Found via deep scan
+	StatusDeleted                             // Size < 0 (tombstone)
+	StatusRepaired                            // CRC mismatch fixed by single-byte repair
+	StatusDeletionMarker                      // Size == 0 (deletion marker appended when needle is deleted)
 )
 
 func (s NeedleStatus) String() string {
@@ -30,6 +31,8 @@ func (s NeedleStatus) String() string {
 		return "DELETED"
 	case StatusRepaired:
 		return "REPAIRED"
+	case StatusDeletionMarker:
+		return "DELETION_MARKER"
 	default:
 		return fmt.Sprintf("UNKNOWN(%d)", int(s))
 	}
@@ -68,6 +71,7 @@ type ScanStats struct {
 	TotalNeedles    int
 	ValidNeedles    int
 	DeletedNeedles  int
+	DeletionMarkers int // Size=0 entries (deletion markers in .dat)
 	CorruptedData   int
 	CorruptedHeader int
 	Recovered       int
@@ -78,6 +82,11 @@ type ScanStats struct {
 	IdxEntries      int
 	IdxMatches      int
 	IdxMismatches   int
+	UniqueNeedleIds int // count of distinct NeedleIds
+	IdxActive       int // idx entries with Size > 0 (active)
+	IdxTombstoned   int // idx entries with Size <= 0 (tombstoned)
+	IdxConfirmed    int // active idx entries found in .dat scan
+	IdxOrphaned     int // active idx entries NOT found in .dat scan
 }
 
 type ScanResult struct {
@@ -141,14 +150,16 @@ func ActualDiskSize(size int32, version int) int64 {
 func statusPriority(s NeedleStatus) int {
 	switch s {
 	case StatusValid:
-		return 5
+		return 6
 	case StatusRepaired:
-		return 4
+		return 5
 	case StatusRecovered:
-		return 3
+		return 4
 	case StatusDeleted:
-		return 2
+		return 3
 	case StatusCorruptedData:
+		return 2
+	case StatusDeletionMarker:
 		return 1
 	default:
 		return 0

@@ -207,7 +207,7 @@ func (s *Scanner) phase2Sequential(result *ScanResult) {
 			s.log("  scanning... %d%% (offset %d / %d)", pct, offset, s.datSize)
 		}
 		rec := s.validateAtOffset(offset)
-		if rec != nil && (rec.Status == StatusValid || rec.Status == StatusDeleted || rec.Status == StatusCorruptedData) {
+		if rec != nil && (rec.Status == StatusValid || rec.Status == StatusDeleted || rec.Status == StatusCorruptedData || rec.Status == StatusDeletionMarker) {
 			rec.Source = "sequential"
 			// Cross-reference with idx
 			if s.idxEntries != nil {
@@ -235,7 +235,7 @@ func (s *Scanner) phase2Sequential(result *ScanResult) {
 
 		for scanOffset < s.datSize {
 			candidate := s.validateAtOffset(scanOffset)
-			if candidate != nil && (candidate.Status == StatusValid || candidate.Status == StatusDeleted) {
+			if candidate != nil && (candidate.Status == StatusValid || candidate.Status == StatusDeleted || candidate.Status == StatusDeletionMarker) {
 				// Found next valid needle
 				gap := Gap{StartOffset: gapStart, EndOffset: scanOffset}
 				result.CorruptionGaps = append(result.CorruptionGaps, gap)
@@ -336,8 +336,10 @@ func (s *Scanner) validateAtOffset(offset int64) *NeedleRecord {
 }
 
 func (s *Scanner) computeStats(result *ScanResult) {
+	uniqueIds := make(map[uint64]struct{})
 	for _, rec := range result.Records {
 		result.Stats.TotalNeedles++
+		uniqueIds[rec.NeedleId] = struct{}{}
 		switch rec.Status {
 		case StatusValid:
 			result.Stats.ValidNeedles++
@@ -352,10 +354,36 @@ func (s *Scanner) computeStats(result *ScanResult) {
 			result.Stats.BytesRecovered += rec.ActualDiskSize(result.Version)
 		case StatusRepaired:
 			result.Stats.Repaired++
+		case StatusDeletionMarker:
+			result.Stats.DeletionMarkers++
 		}
 	}
+	result.Stats.UniqueNeedleIds = len(uniqueIds)
 	result.Stats.BytesScanned = result.DatFileSize
 	for _, gap := range result.CorruptionGaps {
 		result.Stats.BytesCorrupted += gap.Size()
+	}
+
+	// Idx cross-reference stats
+	if s.idxEntries != nil {
+		// Build set of NeedleIds found in scan (excluding deletion markers)
+		scannedIds := make(map[uint64]struct{})
+		for _, rec := range result.Records {
+			if rec.Status != StatusDeletionMarker {
+				scannedIds[rec.NeedleId] = struct{}{}
+			}
+		}
+
+		for _, entry := range s.idxEntries {
+			if entry.Size > 0 {
+				result.Stats.IdxActive++
+				if _, found := scannedIds[entry.NeedleId]; found {
+					result.Stats.IdxConfirmed++
+				}
+			} else {
+				result.Stats.IdxTombstoned++
+			}
+		}
+		result.Stats.IdxOrphaned = result.Stats.IdxActive - result.Stats.IdxConfirmed
 	}
 }
