@@ -144,7 +144,11 @@ func (s *Scanner) Run() (*ScanResult, error) {
 
 	// Phase 4: tail-pattern recovery (optional, only V3)
 	if s.DeepScan && len(result.CorruptionGaps) > 0 && s.Version == 3 {
-		s.log("[phase 4/4] tail-pattern recovery in %d gaps...", len(result.CorruptionGaps))
+		totalGapBytes := int64(0)
+		for _, g := range result.CorruptionGaps {
+			totalGapBytes += g.Size()
+		}
+		s.log("[phase 4/4] tail-pattern recovery in %d gaps (%s total)...", len(result.CorruptionGaps), humanSize(totalGapBytes))
 		seenOffsets := make(map[int64]bool)
 		for _, rec := range result.Records {
 			seenOffsets[rec.Offset] = true
