@@ -54,22 +54,31 @@ func verifyOutputInternal(outputDatPath string, originalResult *ScanResult, log 
 		outputResult.Stats.CorruptedHeader == 0 &&
 		len(outputResult.CorruptionGaps) == 0
 
-	// Check for regressions: output should not be worse than input
-	origRecoverable := originalResult.Stats.ValidNeedles + originalResult.Stats.Recovered + originalResult.Stats.Repaired
-	outRecoverable := outputResult.Stats.ValidNeedles + outputResult.Stats.Recovered
-
-	// A regression means we lost needles that were fine in the original
-	vr.Regression = outRecoverable < origRecoverable
-
-	// Needle-level content verification
+	// Needle-level content verification (NeedleId-based, accounts for deduplication)
 	if log != nil {
 		log("verify: comparing needle content between original and output...")
 	}
 	verifyNeedleContent(originalResult, outputResult, vr, log)
 
-	if vr.Regression && len(vr.NeedlesMissing) > 0 {
+	// Check for regressions based on NeedleId-level checks, not raw counts.
+	// The extractor deduplicates by NeedleId, so raw needle counts may decrease
+	// without actual data loss. Regression is true only if unique NeedleIds were lost.
+	origRecoverable := originalResult.Stats.ValidNeedles + originalResult.Stats.Recovered + originalResult.Stats.Repaired
+	outRecoverable := outputResult.Stats.ValidNeedles + outputResult.Stats.Recovered
+
+	if len(vr.NeedlesMissing) > 0 || len(vr.NeedlesCorrupt) > 0 {
+		// Content verification found specific missing/corrupted NeedleIds
+		vr.Regression = true
+	} else if outRecoverable < origRecoverable && vr.NeedlesIntact == 0 {
+		// No content verification was possible (original had no Records),
+		// fall back to raw count comparison
+		vr.Regression = true
+	}
+
+	if vr.Regression {
 		if log != nil {
-			log("verify: REGRESSION — %d needles missing from output", len(vr.NeedlesMissing))
+			log("verify: REGRESSION — %d needles missing, %d corrupted in output",
+				len(vr.NeedlesMissing), len(vr.NeedlesCorrupt))
 		}
 	}
 
@@ -152,8 +161,15 @@ func buildVerifySummary(vr *VerifyResult, origRecoverable, outRecoverable int) s
 		parts = append(parts, fmt.Sprintf("FAIL: %d needles corrupted during extract", len(vr.NeedlesCorrupt)))
 	}
 	if vr.Regression && len(vr.NeedlesMissing) == 0 && len(vr.NeedlesCorrupt) == 0 {
-		parts = append(parts, fmt.Sprintf("FAIL: regression detected — original had %d recoverable needles, output has %d",
+		parts = append(parts, fmt.Sprintf("FAIL: regression detected — original had %d recoverable needles, output has %d (by NeedleId)",
 			origRecoverable, outRecoverable))
+	}
+
+	// Note when raw counts differ due to deduplication (not a regression)
+	if !vr.Regression && outRecoverable < origRecoverable {
+		diff := origRecoverable - outRecoverable
+		parts = append(parts, fmt.Sprintf("PASS: %d fewer needle records due to deduplication (all %d unique NeedleIds preserved)",
+			diff, outRecoverable))
 	}
 
 	if len(parts) == 0 {
