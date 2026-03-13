@@ -110,25 +110,23 @@ func PrintReport(w io.Writer, result *ScanResult, verbose bool, signatures ...[]
 			pct := float64(recoverable) / float64(dataBearing) * 100
 			fmt.Fprintf(w, "Recovery rate:   %.1f%%\n", pct)
 		}
-		fmt.Fprintf(w, "\nRecommended actions:\n")
-		if len(result.CorruptionGaps) > 0 || result.Stats.CorruptedData > 0 {
-			fmt.Fprintf(w, "  1. weed-rescue --deep --repair --extract repaired.dat --verify %s\n", result.datPath)
-			fmt.Fprintf(w, "     # Deep scan + tail recovery + CRC repair + extract + verify output\n")
-		}
+		fmt.Fprintf(w, "\nRecommended next step (single command runs the full pipeline):\n")
 		if result.Stats.CorruptedData > 0 {
-			fmt.Fprintf(w, "  2. weed-rescue --repair --dry-run %s\n", result.datPath)
-			fmt.Fprintf(w, "     # Preview: show which corrupted needles can be fixed without writing files\n")
+			fmt.Fprintf(w, "\n  # Preview repairs first (no files written):\n")
+			fmt.Fprintf(w, "  weed-rescue --repair --dry-run %s\n", result.datPath)
 		}
-		if len(result.CorruptionGaps) > 0 || result.Stats.CorruptedData > 0 {
-			fmt.Fprintf(w, "  3. weed-rescue --extract recovered.dat --verify %s\n", result.datPath)
-			fmt.Fprintf(w, "     # Extract %d valid needles only (skip corrupted) + verify\n", recoverable)
-		}
+		fmt.Fprintf(w, "\n  # Full recovery pipeline — scan + repair + extract + verify:\n")
+		fmt.Fprintf(w, "  weed-rescue \\\n")
+		fmt.Fprintf(w, "    --backup-dir /backup \\\n")
+		fmt.Fprintf(w, "    --deep \\\n")
 		if result.Stats.CorruptedData > 0 {
-			fmt.Fprintf(w, "  4. weed-rescue --extract all.dat --include-corrupted %s\n", result.datPath)
-			fmt.Fprintf(w, "     # Extract including %d corrupted needles as-is (no repair)\n", result.Stats.CorruptedData)
+			fmt.Fprintf(w, "    --repair \\\n")
 		}
+		fmt.Fprintf(w, "    --extract recovered.dat \\\n")
+		fmt.Fprintf(w, "    --verify \\\n")
+		fmt.Fprintf(w, "    %s\n", result.datPath)
+		fmt.Fprintf(w, "\n  # Or rebuild .idx only (%d entries):\n", totalUseful)
 		fmt.Fprintf(w, "  weed-rescue --rebuildIdx %s\n", result.datPath)
-		fmt.Fprintf(w, "  # Rebuild .idx from %d entries found in the .dat\n", totalUseful)
 	}
 }
 
