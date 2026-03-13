@@ -215,6 +215,83 @@ When bit rot corrupts a single byte in a needle's data:
 
 Performance: ~2.5 billion CRC ops for a 10 MB needle (a few seconds). Needles larger than 10 MB are skipped.
 
+## Comparison with Built-in SeaweedFS Tools
+
+SeaweedFS has two built-in maintenance commands: `weed fix` and `weed compact`. This section explains how `weed-rescue` differs and when to use which.
+
+### Summary Table
+
+| | `weed fix` | `weed compact` (data) | `weed compact` (index) | `weed-rescue` |
+|---|---|---|---|---|
+| **Purpose** | Rebuild `.idx` from `.dat` | Remove deleted needles from `.dat` | Remove deleted needles using `.idx` | Diagnose and recover corrupted volumes |
+| **Offline** | Yes (stop volume server) | Yes (stop volume server) | Yes (stop volume server) | Yes (standalone binary) |
+| **Reads .dat** | Sequentially | Sequentially | Random access via `.idx` | Sequential + deep scan + tail recovery |
+| **Reads .idx** | No (ignores it) | Yes (for needle map) | Yes (primary input) | Optional (cross-reference) |
+| **Writes .dat** | No | Yes (`.cpd` file) | Yes (`.cpd` file) | Optional (`--extract`) |
+| **Writes .idx** | Yes (rebuilds) | Yes (`.cpx` file) | Yes (`.cpx` file) | Optional (`--extract` / `--rebuildIdx`) |
+| **Validates CRC** | No | No | No | Yes (CRC32-C on every needle) |
+| **Detects corruption** | No | No — fails or silently copies bad data | No — skips if `.idx` says deleted | Yes (reports gaps, CRC mismatches) |
+| **Fixes corruption** | No | No | No | Yes (`--repair` for single-byte bit-rot) |
+| **Deep scan** | No | No | No | Yes (byte-by-byte in corruption gaps) |
+| **Tail recovery** | No | No | No | Yes (V3 timestamp-based reconstruction) |
+| **Backup before modify** | No | No | No | Yes (`--backup-dir` + SHA-256 verify) |
+| **Verification** | No | No | No | Yes (`--verify` re-scans output) |
+| **Atomic writes** | No | No (rename `.cpd`→`.dat`) | No (rename `.cpd`→`.dat`) | Yes (temp + fsync + rename) |
+| **Deletion markers** | Included in rebuilt `.idx` | Skipped (only copies active) | Skipped (only copies active) | Detected and reported separately |
+| **Output format** | Replaces `.idx` in-place | `.cpd` + `.cpx` (manual rename) | `.cpd` + `.cpx` (manual rename) | Report + optional clean `.dat`/`.idx` |
+| **JSON output** | No | No | No | Yes (`--json`) |
+
+### When to Use Each Tool
+
+**`weed fix`** — Use when your `.idx` is missing or corrupted but the `.dat` is healthy.
+- Scans `.dat` sequentially, calls `ReadNeedleHeader` on each needle
+- Builds a new `.idx` with all needle offsets and sizes
+- Does NOT validate data integrity — if a needle header looks valid, it's included
+- Does NOT detect or skip corrupted data regions
+- If the `.dat` has corruption mid-file, `weed fix` will fail or produce a truncated `.idx`
+- Has `-ignoreError` flag to continue past read errors (but silently skips affected needles)
+
+**`weed compact -method=data`** — Use for routine compaction of healthy volumes to reclaim space.
+- Scans `.dat` sequentially, checks each needle against the in-memory needle map
+- Only copies needles that are still active (`nv.Size > 0 && nv.Size.IsValid()`)
+- Skips expired TTL needles
+- Output goes to `.cpd`/`.cpx`, requires manual rename or `CommitCompact` from running server
+- Does NOT validate CRC — corrupted data is copied as-is if the needle is "active"
+- If corruption breaks a needle header, `ScanVolumeFile` returns an error and compaction fails
+
+**`weed compact -method=index`** — Use when deletions are in the `.idx` but the `.dat` hasn't been cleaned yet.
+- Reads `.idx` to know which needles are active, then copies them from `.dat`
+- Faster for volumes with many deletions (random-access reads only active needles)
+- Same limitations: no CRC validation, no corruption detection, fails on read errors
+
+**`weed-rescue`** — Use when you suspect or know corruption exists, or for safety-critical recovery.
+- Designed specifically for damaged volumes — corruption is expected, not an error
+- Validates every needle's CRC32-C to distinguish intact vs damaged data
+- Scans past corruption gaps to find valid needles after damaged regions
+- Deep scan (`--deep`) finds needles inside gaps whose headers were overwritten
+- Tail recovery reconstructs V3 needles from CRC+timestamp patterns
+- `--repair` fixes single-byte bit-rot (brute-force 256 values per byte position)
+- Never modifies the source file — all output is to new files
+- Full safety pipeline: backup → scan → repair → extract → verify → replace
+
+### Decision Flowchart
+
+```
+Is the volume corrupted or damaged?
+├── No, just want to remove deleted needles
+│   └── Use: weed compact -method=data
+├── No, just need to rebuild missing .idx
+│   └── Use: weed fix
+├── Yes / Not sure
+│   └── Use: weed-rescue (scan first, then decide)
+│       ├── Minor (CRC mismatches only)
+│       │   └── weed-rescue --repair --extract clean.dat --verify
+│       ├── Severe (corruption gaps, lost headers)
+│       │   └── weed-rescue --deep --repair --extract clean.dat --verify
+│       └── Just need a report
+│           └── weed-rescue /data/volume.dat
+```
+
 ## Safety Model
 
 - **Source is never modified** — all reads are via `ReadAt` on a read-only file descriptor
