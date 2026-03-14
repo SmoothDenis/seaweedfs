@@ -234,6 +234,150 @@ func TestReplaceOriginalMissingRecovered(t *testing.T) {
 	}
 }
 
+func TestRecoverInterruptedReplaceNoMarker(t *testing.T) {
+	dir := t.TempDir()
+	datPath := filepath.Join(dir, "volume.dat")
+	os.WriteFile(datPath, []byte("data"), 0644)
+
+	err := RecoverInterruptedReplace(datPath, nil)
+	if err == nil {
+		t.Fatal("expected error when no marker exists")
+	}
+}
+
+func TestRecoverInterruptedReplaceNeverStarted(t *testing.T) {
+	dir := t.TempDir()
+	datPath := filepath.Join(dir, "volume.dat")
+	idxPath := filepath.Join(dir, "volume.idx")
+	os.WriteFile(datPath, []byte("original dat"), 0644)
+	os.WriteFile(idxPath, []byte("original idx"), 0644)
+
+	// Write marker but no .bak files exist → replacement never started
+	markerPath := datPath + ".rescue-replace-in-progress"
+	markerContent := "original_dat=" + datPath + "\noriginal_idx=" + idxPath +
+		"\nrecovered_dat=" + filepath.Join(dir, "rec.dat") +
+		"\nrecovered_idx=" + filepath.Join(dir, "rec.idx") +
+		"\nbak_dat=" + datPath + ".bak\nbak_idx=" + idxPath + ".bak\n"
+	os.WriteFile(markerPath, []byte(markerContent), 0644)
+
+	err := RecoverInterruptedReplace(datPath, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Marker should be removed
+	if _, err := os.Stat(markerPath); err == nil {
+		t.Error("marker should have been removed")
+	}
+	// Originals intact
+	data, _ := os.ReadFile(datPath)
+	if string(data) != "original dat" {
+		t.Errorf("original dat corrupted: %q", string(data))
+	}
+}
+
+func TestRecoverInterruptedReplaceStep1Done(t *testing.T) {
+	dir := t.TempDir()
+	datPath := filepath.Join(dir, "volume.dat")
+	idxPath := filepath.Join(dir, "volume.idx")
+	bakDat := datPath + ".bak"
+
+	// Simulate: step 1 completed (dat renamed to bak), idx still exists
+	os.WriteFile(bakDat, []byte("original dat"), 0644)
+	os.WriteFile(idxPath, []byte("original idx"), 0644)
+	// datPath does NOT exist (it was renamed to .bak)
+
+	markerPath := datPath + ".rescue-replace-in-progress"
+	markerContent := "original_dat=" + datPath + "\noriginal_idx=" + idxPath +
+		"\nrecovered_dat=" + filepath.Join(dir, "rec.dat") +
+		"\nrecovered_idx=" + filepath.Join(dir, "rec.idx") +
+		"\nbak_dat=" + bakDat + "\nbak_idx=" + idxPath + ".bak\n"
+	os.WriteFile(markerPath, []byte(markerContent), 0644)
+
+	err := RecoverInterruptedReplace(datPath, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Should have rolled back: .dat restored from .bak
+	data, _ := os.ReadFile(datPath)
+	if string(data) != "original dat" {
+		t.Errorf("dat should be restored, got %q", string(data))
+	}
+	// .bak should be gone (renamed back)
+	if _, err := os.Stat(bakDat); err == nil {
+		t.Error("bak dat should have been renamed back")
+	}
+}
+
+func TestRecoverInterruptedReplaceSteps12Done(t *testing.T) {
+	dir := t.TempDir()
+	datPath := filepath.Join(dir, "volume.dat")
+	idxPath := filepath.Join(dir, "volume.idx")
+	bakDat := datPath + ".bak"
+	bakIdx := idxPath + ".bak"
+	recDat := filepath.Join(dir, "recovered.dat")
+	recIdx := filepath.Join(dir, "recovered.idx")
+
+	// Simulate: steps 1-2 done (both renamed to .bak), recovered files exist
+	os.WriteFile(bakDat, []byte("original dat"), 0644)
+	os.WriteFile(bakIdx, []byte("original idx"), 0644)
+	os.WriteFile(recDat, []byte("recovered dat"), 0644)
+	os.WriteFile(recIdx, []byte("recovered idx"), 0644)
+
+	markerPath := datPath + ".rescue-replace-in-progress"
+	markerContent := "original_dat=" + datPath + "\noriginal_idx=" + idxPath +
+		"\nrecovered_dat=" + recDat + "\nrecovered_idx=" + recIdx +
+		"\nbak_dat=" + bakDat + "\nbak_idx=" + bakIdx + "\n"
+	os.WriteFile(markerPath, []byte(markerContent), 0644)
+
+	err := RecoverInterruptedReplace(datPath, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Should have completed: recovered files moved to original paths
+	data, _ := os.ReadFile(datPath)
+	if string(data) != "recovered dat" {
+		t.Errorf("dat should have recovered content, got %q", string(data))
+	}
+	data, _ = os.ReadFile(idxPath)
+	if string(data) != "recovered idx" {
+		t.Errorf("idx should have recovered content, got %q", string(data))
+	}
+}
+
+func TestRecoverInterruptedReplaceFullyDone(t *testing.T) {
+	dir := t.TempDir()
+	datPath := filepath.Join(dir, "volume.dat")
+	idxPath := filepath.Join(dir, "volume.idx")
+	bakDat := datPath + ".bak"
+	bakIdx := idxPath + ".bak"
+
+	// Simulate: all steps done, just stale marker
+	os.WriteFile(datPath, []byte("recovered dat"), 0644)
+	os.WriteFile(idxPath, []byte("recovered idx"), 0644)
+	os.WriteFile(bakDat, []byte("original dat"), 0644)
+	os.WriteFile(bakIdx, []byte("original idx"), 0644)
+
+	markerPath := datPath + ".rescue-replace-in-progress"
+	markerContent := "original_dat=" + datPath + "\noriginal_idx=" + idxPath +
+		"\nrecovered_dat=" + filepath.Join(dir, "rec.dat") +
+		"\nrecovered_idx=" + filepath.Join(dir, "rec.idx") +
+		"\nbak_dat=" + bakDat + "\nbak_idx=" + bakIdx + "\n"
+	os.WriteFile(markerPath, []byte(markerContent), 0644)
+
+	err := RecoverInterruptedReplace(datPath, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Marker removed
+	if _, err := os.Stat(markerPath); err == nil {
+		t.Error("marker should have been removed")
+	}
+}
+
 func TestAtomicExtractDoesNotLeavePartialFiles(t *testing.T) {
 	dir := t.TempDir()
 	datPath := filepath.Join(dir, "test.dat")

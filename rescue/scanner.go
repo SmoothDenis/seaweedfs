@@ -82,7 +82,14 @@ func (s *Scanner) Run() (*ScanResult, error) {
 	extraSize := int(binary.BigEndian.Uint16(header[6:8]))
 	superBlockTotal := SuperBlockSize + extraSize
 	if int64(superBlockTotal) > s.datSize {
-		return nil, fmt.Errorf("superblock ExtraSize=%d exceeds file size", extraSize)
+		if s.Version != 0 && int(header[0]) != s.Version {
+			// Superblock is corrupted but user forced version — ignore ExtraSize
+			s.log("warning: superblock appears corrupted (ExtraSize=%d exceeds file), ignoring ExtraSize with forced version", extraSize)
+			extraSize = 0
+			superBlockTotal = SuperBlockSize
+		} else {
+			return nil, fmt.Errorf("superblock ExtraSize=%d exceeds file size", extraSize)
+		}
 	}
 
 	// Read full superblock including extra data

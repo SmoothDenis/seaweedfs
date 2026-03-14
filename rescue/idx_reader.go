@@ -48,7 +48,13 @@ func ReadIdxFile(path string) (map[uint64]IdxEntry, error) {
 		entrySize = IdxEntrySize4
 		offsetSize = 4
 	default:
-		return nil, fmt.Errorf("idx file size %d is not a multiple of 16 (4-byte offset) or 17 (5-byte offset)", fileSize)
+		rem16 := fileSize % int64(IdxEntrySize4)
+		rem17 := fileSize % int64(IdxEntrySize5)
+		return nil, fmt.Errorf("idx file size %d is not aligned to entry size: "+
+			"%d bytes remainder for 16-byte entries (4-byte offset), "+
+			"%d bytes remainder for 17-byte entries (5-byte offset). "+
+			"The file may be truncated or corrupted. Use --rebuildIdx to regenerate from .dat",
+			fileSize, rem16, rem17)
 	}
 
 	entryCount := int(fileSize / int64(entrySize))

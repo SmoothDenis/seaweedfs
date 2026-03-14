@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 )
 
@@ -330,8 +331,152 @@ func CheckInterruptedReplace(datPath string) string {
 		return "" // no marker = clean
 	}
 	return fmt.Sprintf("WARNING: interrupted replace detected (marker: %s)\nContents:\n%s\n"+
-		"The previous rescue --replace was interrupted. Check .bak files and resolve manually.\n"+
-		"Remove %s after resolving.", markerPath, string(data), markerPath)
+		"The previous rescue --replace was interrupted.\n"+
+		"Use --recover-replace to automatically complete or roll back the operation.\n"+
+		"Or remove %s after resolving manually.", markerPath, string(data), markerPath)
+}
+
+// parseMarkerFile parses the .rescue-replace-in-progress marker file into a map.
+func parseMarkerFile(data []byte) map[string]string {
+	result := make(map[string]string)
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) == 2 {
+			result[parts[0]] = parts[1]
+		}
+	}
+	return result
+}
+
+// RecoverInterruptedReplace detects the state of an interrupted replace operation
+// and either completes it or rolls it back, depending on which steps had finished.
+//
+// The replace operation has 4 steps (see ReplaceOriginal):
+//  1. Rename original .dat → .bak
+//  2. Rename original .idx → .bak
+//  3. Rename recovered .dat → original path
+//  4. Rename recovered .idx → original path
+//
+// This function inspects which files exist to determine how far the operation got,
+// then either completes the remaining steps or rolls back the completed ones.
+func RecoverInterruptedReplace(datPath string, log Logger) error {
+	markerPath := datPath + ".rescue-replace-in-progress"
+	data, err := os.ReadFile(markerPath)
+	if err != nil {
+		return fmt.Errorf("no interrupted replace found (no marker at %s)", markerPath)
+	}
+
+	paths := parseMarkerFile(data)
+	origDat := paths["original_dat"]
+	origIdx := paths["original_idx"]
+	recDat := paths["recovered_dat"]
+	recIdx := paths["recovered_idx"]
+	bakDat := paths["bak_dat"]
+	bakIdx := paths["bak_idx"]
+
+	if origDat == "" || origIdx == "" || bakDat == "" || bakIdx == "" {
+		return fmt.Errorf("marker file is incomplete, cannot auto-recover: %s", markerPath)
+	}
+
+	// Check which files exist to determine state
+	origDatExists := fileExists(origDat)
+	origIdxExists := fileExists(origIdx)
+	bakDatExists := fileExists(bakDat)
+	bakIdxExists := fileExists(bakIdx)
+	recDatExists := fileExists(recDat)
+	recIdxExists := fileExists(recIdx)
+
+	if log != nil {
+		log("recover-replace: analyzing state...")
+		log("  original .dat (%s): exists=%v", origDat, origDatExists)
+		log("  original .idx (%s): exists=%v", origIdx, origIdxExists)
+		log("  backup .dat   (%s): exists=%v", bakDat, bakDatExists)
+		log("  backup .idx   (%s): exists=%v", bakIdx, bakIdxExists)
+		log("  recovered .dat (%s): exists=%v", recDat, recDatExists)
+		log("  recovered .idx (%s): exists=%v", recIdx, recIdxExists)
+	}
+
+	switch {
+	case origDatExists && origIdxExists && !bakDatExists && !bakIdxExists:
+		// State: replacement never started. Just remove the marker.
+		if log != nil {
+			log("recover-replace: replacement never started, removing stale marker")
+		}
+
+	case !origDatExists && bakDatExists && origIdxExists && !bakIdxExists:
+		// State: only step 1 completed (dat renamed to bak). Roll back.
+		if log != nil {
+			log("recover-replace: step 1 completed, rolling back .dat rename")
+		}
+		if err := os.Rename(bakDat, origDat); err != nil {
+			return fmt.Errorf("rollback: rename %s -> %s: %w", bakDat, origDat, err)
+		}
+
+	case !origDatExists && !origIdxExists && bakDatExists && bakIdxExists && recDatExists && recIdxExists:
+		// State: steps 1-2 completed (both originals backed up, recovered files exist).
+		// Complete steps 3-4: move recovered files into place.
+		if log != nil {
+			log("recover-replace: steps 1-2 completed, completing steps 3-4")
+		}
+		if err := os.Rename(recDat, origDat); err != nil {
+			return fmt.Errorf("complete: rename %s -> %s: %w", recDat, origDat, err)
+		}
+		if err := os.Rename(recIdx, origIdx); err != nil {
+			return fmt.Errorf("complete: rename %s -> %s: %w", recIdx, origIdx, err)
+		}
+
+	case origDatExists && !origIdxExists && bakDatExists && bakIdxExists && !recDatExists:
+		// State: steps 1-3 completed (recovered .dat moved to original, .idx not yet).
+		// Complete step 4.
+		if log != nil {
+			log("recover-replace: steps 1-3 completed, completing step 4")
+		}
+		if recIdxExists {
+			if err := os.Rename(recIdx, origIdx); err != nil {
+				return fmt.Errorf("complete: rename %s -> %s: %w", recIdx, origIdx, err)
+			}
+		} else {
+			// recovered .idx also gone — restore from backup
+			if log != nil {
+				log("recover-replace: recovered .idx missing, restoring .idx from backup")
+			}
+			if err := os.Rename(bakIdx, origIdx); err != nil {
+				return fmt.Errorf("rollback: rename %s -> %s: %w", bakIdx, origIdx, err)
+			}
+		}
+
+	case origDatExists && origIdxExists && bakDatExists && bakIdxExists:
+		// State: all steps completed. Just clean up.
+		if log != nil {
+			log("recover-replace: replacement fully completed, removing stale marker")
+		}
+
+	default:
+		return fmt.Errorf("unrecognized state — cannot auto-recover.\n"+
+			"  original .dat exists=%v, .idx exists=%v\n"+
+			"  backup .dat exists=%v, .idx exists=%v\n"+
+			"  recovered .dat exists=%v, .idx exists=%v\n"+
+			"  Please resolve manually and remove %s",
+			origDatExists, origIdxExists, bakDatExists, bakIdxExists, recDatExists, recIdxExists, markerPath)
+	}
+
+	// Remove the marker file
+	if err := os.Remove(markerPath); err != nil {
+		return fmt.Errorf("remove marker file: %w", err)
+	}
+	if log != nil {
+		log("recover-replace: done — marker removed")
+	}
+	return nil
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }
 
 // PreFlightChecks validates that the environment is ready for a rescue operation.

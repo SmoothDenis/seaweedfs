@@ -29,6 +29,7 @@ func main() {
 	verify := flag.Bool("verify", false, "re-scan output after --extract and show before/after comparison with verdict")
 	dryRun := flag.Bool("dry-run", false, "with --repair: preview which needles can be fixed without writing files")
 	replace := flag.Bool("replace", false, "after --verify passes, replace original volume with the recovered one")
+	recoverReplace := flag.Bool("recover-replace", false, "recover from an interrupted --replace operation (complete or roll back)")
 	force := flag.Bool("force", false, "skip confirmation prompts and overwrite existing output files")
 	backupDir := flag.String("backup-dir", "", "copy original .dat and .idx to this directory before any modifications")
 	showVersion := flag.Bool("V", false, "print version and exit")
@@ -245,6 +246,27 @@ BUILD
 		logger = func(format string, args ...interface{}) {
 			fmt.Fprintf(os.Stderr, format+"\n", args...)
 		}
+	}
+
+	// --- Recover interrupted replace if requested ---
+	if *recoverReplace {
+		warning := rescue.CheckInterruptedReplace(datPath)
+		if warning == "" {
+			fmt.Fprintf(os.Stderr, "No interrupted replace found for %s\n", datPath)
+			os.Exit(0)
+		}
+		if err := rescue.RecoverInterruptedReplace(datPath, logger); err != nil {
+			fmt.Fprintf(os.Stderr, "Error recovering interrupted replace: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Fprintf(os.Stderr, "Interrupted replace recovered successfully.\n")
+		os.Exit(0)
+	}
+
+	// Check for interrupted replace and warn
+	if warning := rescue.CheckInterruptedReplace(datPath); warning != "" {
+		fmt.Fprintf(os.Stderr, "%s\n", warning)
+		os.Exit(1)
 	}
 
 	// --- Step 1: Backup original if --backup-dir specified ---
