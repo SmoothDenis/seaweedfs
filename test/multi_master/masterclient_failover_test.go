@@ -155,3 +155,102 @@ func TestMasterClientFollowsLeaderOnFailover(t *testing.T) {
 	}
 	t.Logf("client converged to new leader %s", newLeaderAddr)
 }
+
+// assignErr issues an Assign RPC to whatever master the client currently points
+// at and returns the error (nil on success). A non-leader master answers with
+// raft.NotLeaderError ("Not current leader").
+func assignErr(client *wdclient.MasterClient) (master string, err error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
+	defer cancel()
+	m := client.GetMaster(ctx)
+	master = m.ToHttpAddress()
+	if m == "" {
+		return "", context.DeadlineExceeded
+	}
+	err = pb.WithMasterClient(false, m, insecureDialOption(), false, func(c master_pb.SeaweedClient) error {
+		actx, acancel := context.WithTimeout(context.Background(), 1*time.Second)
+		defer acancel()
+		_, e := c.Assign(actx, &master_pb.AssignRequest{Count: 1})
+		return e
+	})
+	return master, err
+}
+
+// TestMasterClientStuckOnOldLeaderAfterQuorumLoss is the precise reproduction of
+// the production symptom: filer/s3 keep talking to the OLD (now non-leader)
+// master and keep getting NotLeaderError after the leader loses leadership.
+//
+// We force a clean step-down WITHOUT killing the leader process by stopping the
+// two followers (quorum loss). The leader steps down but its KeepConnected
+// stream to the client is NOT promptly closed because informNewLeader blocks in
+// the 20s Topo.Leader() backoff while no new leader exists. During that window
+// the client's currentMaster stays pinned to the old leader and every Assign
+// returns "Not current leader".
+func TestMasterClientStuckOnOldLeaderAfterQuorumLoss(t *testing.T) {
+	mc := StartMasterCluster(t)
+
+	leaderIdx, leaderAddr := mc.FindLeader()
+	if leaderIdx < 0 {
+		t.Fatal("no leader found")
+	}
+	t.Logf("initial leader: node %d at %s", leaderIdx, leaderAddr)
+
+	client := wdclient.NewMasterClient(insecureDialOption(), "", "stuck-client", "", "", "", mc.masterServerDiscovery())
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go client.KeepConnectedToMaster(ctx)
+
+	if got := pollGetMasterHttp(client, leaderAddr, 20*time.Second); got != leaderAddr {
+		t.Fatalf("client failed to resolve initial leader %q, got %q", leaderAddr, got)
+	}
+	t.Logf("client connected to leader %s; Assign works = %v", leaderAddr, func() bool {
+		_, e := assignErr(client)
+		return e == nil || !strings.Contains(strings.ToLower(fmtErr(e)), "leader")
+	}())
+
+	// Stop the two followers -> leader loses quorum and must step down.
+	f1, f2 := (leaderIdx+1)%3, (leaderIdx+2)%3
+	mc.StopNode(f1)
+	mc.StopNode(f2)
+	t.Logf("stopped followers %d and %d (quorum lost); old leader %d still running", f1, f2, leaderIdx)
+
+	// Measure how long the client stays pinned to the old leader returning
+	// NotLeaderError. A correct client should stop pointing at the demoted
+	// master quickly (within ~one KeepConnected ticker interval, ~5-6s).
+	// After a clean fix the demoted master closes the client's stream within
+	// one KeepConnected ticker interval (~5s) plus step-down latency, instead of
+	// blocking in the 20s Topo.Leader() backoff. 12s cleanly separates the
+	// broken (~25s) from the fixed (~5-8s) behavior.
+	const tolerance = 12 * time.Second
+	start := time.Now()
+	deadline := start.Add(25 * time.Second)
+	var lastMaster, lastErr string
+	stuckUntil := time.Time{}
+	for time.Now().Before(deadline) {
+		m, err := assignErr(client)
+		isNotLeader := err != nil && strings.Contains(strings.ToLower(fmtErr(err)), "leader")
+		if m == leaderAddr && isNotLeader {
+			stuckUntil = time.Now()
+			lastMaster, lastErr = m, fmtErr(err)
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+
+	if !stuckUntil.IsZero() {
+		stuckFor := stuckUntil.Sub(start)
+		t.Logf("client kept pointing at OLD leader %s with NotLeaderError for ~%v (last err: %q)", lastMaster, stuckFor.Round(time.Second), lastErr)
+		if stuckFor > tolerance {
+			t.Errorf("REPRO: client stuck on demoted master %s returning NotLeaderError for %v (> %v tolerance)", lastMaster, stuckFor.Round(time.Second), tolerance)
+		}
+	} else {
+		t.Logf("client did not stay stuck on old leader returning NotLeaderError")
+	}
+}
+
+func fmtErr(e error) string {
+	if e == nil {
+		return ""
+	}
+	return e.Error()
+}
+

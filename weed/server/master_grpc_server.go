@@ -358,7 +358,11 @@ func (ms *MasterServer) KeepConnected(stream master_pb.Seaweed_KeepConnectedServ
 		}
 	}()
 
-	ticker := time.NewTicker(5 * time.Second)
+	// Re-check leadership frequently so that a master which just lost leadership
+	// promptly closes the client's stream (via informNewLeader) instead of
+	// keeping the client pinned to a demoted master where every write returns
+	// raft.NotLeaderError. IsLeader() is a cheap RLock'd state check.
+	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 	for {
 		select {
@@ -413,9 +417,15 @@ func (ms *MasterServer) broadcastToClients(message *master_pb.KeepConnectedRespo
 }
 
 func (ms *MasterServer) informNewLeader(stream master_pb.Seaweed_KeepConnectedServer) error {
-	leader, err := ms.Topo.Leader()
-	if err != nil {
-		glog.Errorf("topo leader: %v", err)
+	// Use the non-blocking MaybeLeader here. This runs on a non-leader master
+	// (e.g. one that just stepped down). The blocking Topo.Leader() waits up to
+	// 20s in its backoff when no leader is currently known, which keeps this
+	// client's KeepConnected stream open and pinned to the demoted master. While
+	// pinned, the client keeps directing writes here and getting
+	// raft.NotLeaderError. Returning promptly lets the stream close so the client
+	// reconnects and re-resolves the real leader.
+	leader, err := ms.Topo.MaybeLeader()
+	if err != nil || leader == "" {
 		return raft.NotLeaderError
 	}
 	if err := stream.Send(&master_pb.KeepConnectedResponse{
