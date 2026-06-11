@@ -2,6 +2,7 @@ package multi_master
 
 import (
 	"context"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -254,3 +255,64 @@ func fmtErr(e error) string {
 	return e.Error()
 }
 
+// aliasServerDiscovery builds the master list using "localhost:port" while the
+// masters themselves are started with -ip=127.0.0.1 and therefore advertise the
+// leader as "127.0.0.1:port.grpcPort". This mimics a Kubernetes setup where
+// filer/s3 reach masters via a Service/DNS name that differs (as a string) from
+// the per-pod -ip the masters advertise. Both resolve to the same host so
+// connections succeed, but the advertised leader never string-matches a
+// masters-list entry.
+func (mc *MasterCluster) aliasServerDiscovery() pb.ServerDiscovery {
+	addrs := make([]string, 3)
+	for i := range 3 {
+		addrs[i] = "localhost:" + strconv.Itoa(mc.nodes[i].port)
+	}
+	return *pb.ServerAddresses(strings.Join(addrs, ",")).ToServiceDiscovery()
+}
+
+// TestMasterClientDifferentAddressAlias reproduces the production topology
+// (Kubernetes, masters addressed by a name that differs from their advertised
+// -ip). It verifies that with the differing address the client still resolves
+// the leader and still converges after a failover.
+func TestMasterClientDifferentAddressAlias(t *testing.T) {
+	mc := StartMasterCluster(t)
+
+	leaderIdx, leaderAddr := mc.FindLeader() // "127.0.0.1:port"
+	if leaderIdx < 0 {
+		t.Fatal("no leader found")
+	}
+	aliasLeader := "localhost:" + strconv.Itoa(mc.nodes[leaderIdx].port)
+	t.Logf("leader advertised as %s; client addresses it as %s", leaderAddr, aliasLeader)
+
+	client := wdclient.NewMasterClient(insecureDialOption(), "", "alias-client", "", "", "", mc.aliasServerDiscovery())
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go client.KeepConnectedToMaster(ctx)
+
+	// The client must resolve to the leader. GetMaster will hold the advertised
+	// (127.0.0.1) form, since the masters list (localhost) never matches it.
+	resolveCtx, resolveCancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer resolveCancel()
+	resolved := client.GetMaster(resolveCtx)
+	t.Logf("alias client resolved master = %q", resolved)
+	if resolved == "" {
+		t.Fatal("alias client never resolved a master (stuck on differing address)")
+	}
+	if resolved.ToHttpAddress() != leaderAddr {
+		t.Errorf("alias client resolved %q (http %q), expected leader %q", resolved, resolved.ToHttpAddress(), leaderAddr)
+	}
+
+	// Failover: kill the leader, ensure the alias client converges to the new one.
+	mc.StopNode(leaderIdx)
+	newLeaderIdx, newLeaderAddr, err := mc.WaitForNewLeader(leaderAddr, leaderElectionTimeout)
+	if err != nil {
+		mc.DumpLogs()
+		t.Fatalf("new leader not elected: %v", err)
+	}
+	t.Logf("new leader advertised as %s", newLeaderAddr)
+	if got := pollGetMasterHttp(client, newLeaderAddr, 30*time.Second); got != newLeaderAddr {
+		mc.DumpLogs()
+		t.Fatalf("STUCK: alias client did not converge to new leader %q within 30s, still %q", newLeaderAddr, got)
+	}
+	t.Logf("alias client converged to new leader %s (node %d)", newLeaderAddr, newLeaderIdx)
+}
